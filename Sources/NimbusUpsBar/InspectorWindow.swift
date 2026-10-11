@@ -68,6 +68,8 @@ final class InspectorWindowController: NSWindowController, NSWindowDelegate {
         if window?.isVisible != true { window?.center() }
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
+        // Opening the window always takes one full, fresh look, live updates on or off.
+        refreshOnce()
         visibilityChanged()
         // Whether anyone can see the window (another Space, a full-screen app, the window
         // covered) changes without a reliable notification: while it is open, look once a
@@ -128,7 +130,7 @@ final class InspectorWindowController: NSWindowController, NSWindowDelegate {
         let becameVisible = visible && !model.monitor.inspectorVisible
         if model.monitor.inspectorVisible != visible { model.monitor.inspectorVisible = visible }
         if model.monitor.inspectorOpen != fast { model.monitor.inspectorOpen = fast }
-        // Paused and just shown: one complete look, then hold still.
+        // Shown again (from another Space, unminimised) while paused: one complete look.
         if becameVisible, !live { refreshOnce() }
         if visible, fast != wasFast { scheduleRefresh() }
         wasFast = fast
