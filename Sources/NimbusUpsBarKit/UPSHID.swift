@@ -136,8 +136,12 @@ public final class UPSHID: @unchecked Sendable {
     private var elements: [Element] = []
     private var collections: [RawReport.Collection] = []
     private var deviceInfo: (product: String?, manufacturer: String?, serial: String?) = (nil, nil, nil)
-    /// Main thread; true when a UPS arrived, false when it went.
-    public var onDeviceChange: ((Bool) -> Void)?
+    /// Main thread; true when a UPS arrived, false when it went. `atStart` is true for the UPS
+    /// that was already plugged in when this process started looking: IOKit reports it as an
+    /// arrival too, and that is not news.
+    public var onDeviceChange: ((_ attached: Bool, _ atStart: Bool) -> Void)?
+    /// The registry ids of the devices already present when the manager opened.
+    private var presentAtOpen: Set<UInt64> = []
 
     public var isAttached: Bool { lock.withLock { device != nil } }
 
@@ -156,6 +160,15 @@ public final class UPSHID: @unchecked Sendable {
         }, ctx)
         IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
         IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        // The matching callback fires for these too, once the run loop turns.
+        if let present = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice> {
+            presentAtOpen = Set(present.compactMap(UPSHID.registryID))
+        }
+    }
+
+    private static func registryID(_ dev: IOHIDDevice) -> UInt64? {
+        var id: UInt64 = 0
+        return IORegistryEntryGetRegistryEntryID(IOHIDDeviceGetService(dev), &id) == KERN_SUCCESS ? id : nil
     }
 
     // MARK: Device lifecycle (main run loop)
@@ -198,7 +211,8 @@ public final class UPSHID: @unchecked Sendable {
             collections = colls
             deviceInfo = (prop(kIOHIDProductKey), prop(kIOHIDManufacturerKey), prop(kIOHIDSerialNumberKey))
         }
-        DispatchQueue.main.async { self.onDeviceChange?(true) }
+        let atStart = UPSHID.registryID(dev).map { presentAtOpen.remove($0) != nil } ?? false
+        DispatchQueue.main.async { self.onDeviceChange?(true, atStart) }
     }
 
     private static func typeName(_ t: IOHIDElementType) -> String {
@@ -221,7 +235,7 @@ public final class UPSHID: @unchecked Sendable {
             elements = []
             collections = []
         }
-        DispatchQueue.main.async { self.onDeviceChange?(false) }
+        DispatchQueue.main.async { self.onDeviceChange?(false, false) }
     }
 
     /// The nearest enclosing collection on the Power Device page that names a *part* of the
