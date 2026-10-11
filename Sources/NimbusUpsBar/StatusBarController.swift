@@ -302,17 +302,17 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         healthItem.image = StatusBarController.dot(overall)
         healthItem.submenu = healthMenu(health)
         menu.addItem(healthItem)
+        let sim = NSMenuItem(title: "Simulate an Outage", action: nil, keyEquivalent: "")
+        sim.submenu = simulationMenu()
+        menu.addItem(sim)
+        menu.addItem(.separator())
+
         let inspector = NSMenuItem(title: "Inspector…", action: #selector(openInspector), keyEquivalent: "i")
         inspector.target = self
         // Settings… gets its gear from macOS (a standard item); this one needs its symbol set.
         inspector.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: "Inspector")
         inspector.toolTip = "Everything the UPS reports, live, with the guard, the volumes, the readings and the background agent; each section copyable as JSON."
         menu.addItem(inspector)
-        menu.addItem(.separator())
-
-        let sim = NSMenuItem(title: "Simulate an Outage", action: nil, keyEquivalent: "")
-        sim.submenu = simulationMenu()
-        menu.addItem(sim)
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
         settings.toolTip = "Policy: " + monitor.policyText
