@@ -346,6 +346,7 @@ final class OutagePane: SettingsPane, NSTableViewDataSource, NSTableViewDelegate
     private var upsGoneInOutage: NSPopUpButton!
     private var upsGonePowersDown: NSButton!
     private var upsGoneOnLine: NSPopUpButton!
+    private var postpone: NSTextField!
     private var neverQuitTable: NSTableView!
     private var addApp: NSPopUpButton!
     private var removeApp: NSButton!
@@ -410,6 +411,9 @@ final class OutagePane: SettingsPane, NSTableViewDataSource, NSTableViewDelegate
         powerWhenSafe = Controls.checkbox("Also as soon as every volume is safe", self, #selector(apply))
         form.row("Sleep or shut down means:", Form.stack(powerAction, powerWhenSafe),
                  hint: "Volumes are forced off first (a minute at most). Test Shut down once at the keyboard: --after-safe.")
+        postpone = Controls.duration(self, #selector(apply))
+        form.row("Postpone adds:", postpone,
+                 hint: "The outage menu's Postpone moves every time condition out by this much; charge and runtime still apply. 1 min to 1 h.")
 
         form.section("If the UPS goes missing from USB")
         upsGone = Controls.duration(self, #selector(apply))
@@ -480,6 +484,7 @@ final class OutagePane: SettingsPane, NSTableViewDataSource, NSTableViewDelegate
             upsGone.objectValue = p.upsGoneSeconds
             OutagePane.select(upsGoneInOutage, p.upsGoneInOutage)
             upsGonePowersDown.state = p.upsGoneInOutagePowersDown ? .on : .off
+            postpone.objectValue = s.postponeSeconds
             OutagePane.select(upsGoneOnLine, p.upsGoneOnLine)
             entries = p.neverQuit.subtracting(Policy.alwaysKept).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
             neverQuitTable.reloadData()
@@ -508,6 +513,7 @@ final class OutagePane: SettingsPane, NSTableViewDataSource, NSTableViewDelegate
         p.upsGoneInOutagePowersDown = upsGonePowersDown.state == .on
         if let raw = upsGoneOnLine.selectedItem?.representedObject as? String, let o = Policy.UPSGoneOnLine(rawValue: raw) { p.upsGoneOnLine = o }
         p.neverQuit = Set(entries.filter { !$0.isEmpty })
+        if let v = Controls.value(postpone), v != s.postponeSeconds { s.postponeSeconds = v }
         s.policy = p
         if hardWasNever {
             form.status.stringValue = "Force unmount needs at least one condition; the time on battery was turned back on."
@@ -798,7 +804,7 @@ final class ReadingsPane: SettingsPane {
 
 // MARK: General
 
-/// Persistence, notifications, updates, the Postpone amount, and the log.
+/// Persistence, notifications, updates, and the log.
 @MainActor
 final class GeneralPane: SettingsPane {
     private let updater: Updater?
@@ -806,7 +812,6 @@ final class GeneralPane: SettingsPane {
     private var agentHint: NSTextField!
     private var notifications: NSButton!
     private var autoUpdate: NSButton?
-    private var postpone: NSTextField!
 
     init(updater: Updater?) {
         self.updater = updater
@@ -831,10 +836,6 @@ final class GeneralPane: SettingsPane {
                      hint: "Once a day against GitHub releases (api.github.com). Off, the app talks to nothing at all.")
         }
 
-        form.section("Outage menu")
-        postpone = Controls.duration(self, #selector(apply))
-        form.row("Postpone adds:", postpone,
-                 hint: "The outage menu's Postpone pushes the soft stage and the time limit out by this much. The charge and runtime limits still apply. 1 min to 1 h.")
 
         form.section("Log")
         let open = Controls.button("Open Log File", self, #selector(openLog))
@@ -858,7 +859,6 @@ final class GeneralPane: SettingsPane {
             }
             notifications.state = s.notificationsEnabled ? .on : .off
             if let u = updater { autoUpdate?.state = u.automaticChecks ? .on : .off }
-            postpone.objectValue = s.postponeSeconds
         }
     }
 
@@ -870,7 +870,6 @@ final class GeneralPane: SettingsPane {
             if s.notificationsEnabled { Notifications.shared.requestAuthorizationIfNeeded() }
         }
         if let u = updater, let b = autoUpdate, (b.state == .on) != u.automaticChecks { u.automaticChecks = b.state == .on }
-        if let v = Controls.value(postpone), v != s.postponeSeconds { s.postponeSeconds = v }
         reload()
     }
 
