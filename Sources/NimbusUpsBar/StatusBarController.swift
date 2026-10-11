@@ -385,7 +385,8 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         header.attributedTitle = NSAttributedString(string: "PROTECTED VOLUMES", attributes: [
             .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize).withWeight(.semibold), .foregroundColor: NSColor.secondaryLabelColor])
         menu.addItem(header)
-        let all = monitor.volumes.sorted
+        // Attached volumes, plus chosen ones that are missing; not every drive ever seen.
+        let all = monitor.volumes.sorted.filter { $0.isAttached || Settings.shared.isProtected($0) }
         if all.isEmpty {
             menu.addItem(disabled("No external volumes"))
             return

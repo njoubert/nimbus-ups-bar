@@ -127,8 +127,9 @@ any moment. Then:
   apps or typed as a bundle id or name. Durations are typed as written everywhere else: `90 s`,
   `2 min`, `1 h 30 min`.
 - **Volumes**: all external volumes (the default), or only the ones you check. Volumes seen before
-  but not attached now stay in the list. Disk images and the EFI and boot helper partitions never
-  count as external.
+  but not attached now stay in this checklist, so a drive can be chosen while it is unplugged; the
+  menu and the Inspector show only attached volumes, plus a chosen one that is missing. Disk images
+  and the EFI and boot helper partitions never count as external.
 - **Readings**: how often the UPS is read on line power (10 s) and on battery, in a simulation and
   with the menu open (2 s; also the guard's clock); how long charge and runtime are ignored after
   the transfer and how long power must stay back before an outage is over; how much history the

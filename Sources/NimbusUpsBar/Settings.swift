@@ -205,7 +205,7 @@ final class Settings {
     var knownVolumes: [VolumeState] {
         get {
             (d.array(forKey: Key.knownVolumes) as? [[String: String]] ?? []).compactMap { e in
-                guard let uuid = e["uuid"], let name = e["name"] else { return nil }
+                guard let uuid = e["uuid"], let name = e["name"], VolumeRegistry.keepRemembered(detail: e["detail"] ?? "") else { return nil }
                 return VolumeState(uuid: uuid, name: name, isAttached: false, detail: e["detail"] ?? "")
             }
         }
@@ -225,10 +225,7 @@ final class Settings {
 
     /// Does the policy cover this volume?
     func isProtected(_ v: VolumeState) -> Bool {
-        switch volumeMode {
-        case .allExternal: return true
-        case .selected: return selectedVolumeUUIDs.contains(v.uuid)
-        }
+        VolumeRegistry.protects(v, allExternal: volumeMode == .allExternal, selected: selectedVolumeUUIDs)
     }
 
     // MARK: Readings

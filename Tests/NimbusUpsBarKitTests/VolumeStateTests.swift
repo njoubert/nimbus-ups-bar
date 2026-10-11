@@ -3,10 +3,30 @@
 import DiskArbitration
 import XCTest
 @testable import NimbusUpsBarKit
+import UpsGuardCore
 
 /// `VolumeRegistry.state(from:)` over Disk Arbitration description dictionaries: which disks
 /// count as external volumes worth protecting, and what is said about them.
 final class VolumeStateTests: XCTestCase {
+
+    func testProtectsAttachedOnlyUnlessChosen() {
+        let flitslig = VolumeState(uuid: "B2D1", name: "Flitslig", bsdName: "disk9s1", mountPoint: "/Volumes/Flitslig")
+        let leica = VolumeState(uuid: "F186", name: "LEICA M", isAttached: false, detail: "RW520 · USB · EXFAT · 128.43 GB")
+        let unmounted = VolumeState(uuid: "AAAA", name: "Spare", bsdName: "disk10s1")
+        // Every external volume: the attached ones, mounted or not; an ejected drive is not one.
+        XCTAssertTrue(VolumeRegistry.protects(flitslig, allExternal: true, selected: []))
+        XCTAssertTrue(VolumeRegistry.protects(unmounted, allExternal: true, selected: []), "unmounted by the guard, still attached: still its to remount")
+        XCTAssertFalse(VolumeRegistry.protects(leica, allExternal: true, selected: ["F186"]))
+        // A chosen few: those, attached or not.
+        XCTAssertTrue(VolumeRegistry.protects(leica, allExternal: false, selected: ["F186"]))
+        XCTAssertFalse(VolumeRegistry.protects(flitslig, allExternal: false, selected: ["F186"]))
+    }
+
+    func testRememberedDiskImagesAreDropped() {
+        XCTAssertFalse(VolumeRegistry.keepRemembered(detail: "Disk Image · Virtual Interface · APFS · 17.75 GB"))
+        XCTAssertTrue(VolumeRegistry.keepRemembered(detail: "RW520 · USB · EXFAT · 128.43 GB"))
+        XCTAssertTrue(VolumeRegistry.keepRemembered(detail: ""))
+    }
 
     /// The CP1500's neighbour on the desk: a Lexar NVMe in a Thunderbolt enclosure, mounted.
     func lexar(_ changes: [String: Any?] = [:]) -> [String: Any] {
