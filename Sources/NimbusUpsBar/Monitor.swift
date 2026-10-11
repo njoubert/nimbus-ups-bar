@@ -79,6 +79,10 @@ final class UPSMonitor {
     var menuOpen = false {
         didSet { if menuOpen, !oldValue { hidDue = 0; poll(reason: nil) } }
     }
+    /// Read the UPS now, whatever the cadence, and capture everything (the Inspector's Refresh).
+    func readNow() { fullNext = true; hidDue = 0; poll(reason: nil) }
+    private var fullNext = false
+
     /// The Inspector is on screen: read as often as on battery, so its values move.
     var inspectorOpen = false {
         didSet { if inspectorOpen, !oldValue { hidDue = 0; poll(reason: nil) } }
@@ -226,8 +230,12 @@ final class UPSMonitor {
         hidSequence += 1
         let seq = hidSequence
         let hid = self.hid
+        // Everything (outputs, every report, the descriptor, the properties) only while the
+        // Inspector is on screen; the guard's own reads stay light.
+        let full = inspectorOpen || fullNext
+        fullNext = false
         hidQueue.async { [weak self] in
-            let raw = hid.fetch()
+            let raw = hid.fetch(full: full)
             let report = raw.map { UPSHID.decode($0, now: now) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {

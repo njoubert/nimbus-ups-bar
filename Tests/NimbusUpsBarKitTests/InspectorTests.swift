@@ -9,8 +9,8 @@ import XCTest
 /// that feeds the flash and the change log reports exactly what moved.
 final class InspectorTests: XCTestCase {
 
-    func fixture() throws -> UPSHID.RawReport {
-        let url = try XCTUnwrap(Bundle.module.url(forResource: "cp1500pfclcda", withExtension: "json", subdirectory: "Fixtures"))
+    func fixture(_ name: String = "cp1500pfclcda") throws -> UPSHID.RawReport {
+        let url = try XCTUnwrap(Bundle.module.url(forResource: name, withExtension: "json", subdirectory: "Fixtures"))
         return try JSONDecoder().decode(UPSHID.RawReport.self, from: Data(contentsOf: url))
     }
 
@@ -18,30 +18,48 @@ final class InspectorTests: XCTestCase {
         try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
     }
 
-    func testUPSSectionShowsEveryElementWithItsAddress() throws {
+    func testUPSPageShowsEveryElementOfAnOldCapture() throws {
+        // The 2026-10-10 capture: values only. All 58 show, the string slots included.
         let raw = try fixture()
-        let report = UPSHID.decode(raw, now: 0)
-        let s = Inspector.ups(raw: raw, report: report, readAge: 0.4, attached: true)
-        XCTAssertEqual(s.rows.count, report.fields.count)
-        XCTAssertEqual(Set(s.rows.compactMap(\.group)), Set(report.fields.map(\.section)))
-        let charge = try XCTUnwrap(s.rows.first { $0.group == "Battery" && $0.label == "Charge" })
+        let s = Inspector.ups(raw: raw, report: UPSHID.decode(raw, now: 0), readAge: 0.4, attached: true)
+        XCTAssertEqual(s.rows.count, 58)
+        XCTAssertTrue(s.rows.allSatisfy { $0.group?.hasPrefix("Elements › ") == true })
+        let charge = try XCTUnwrap(s.rows.first { $0.group == "Elements › Battery" && $0.label == "Charge" })
         XCTAssertEqual(charge.value, "100 %")
-        XCTAssertEqual(charge.detail, "0x24 · 0x85/0x66 = 100")
-        XCTAssertTrue(s.subtitle.hasPrefix("\(report.fields.count) elements · read just now in"))
+        XCTAssertTrue(charge.detail?.contains("0x24 · 0x85/0x66 = 100") == true)
+        XCTAssertTrue(s.rows.contains { $0.value.hasPrefix("string slot ") })
+        XCTAssertTrue(s.subtitle.hasPrefix("58 elements · the routine read"))
     }
 
-    func testUPSJSONCarriesDecodedFieldsAndRawValues() throws {
-        let raw = try fixture()
-        let s = Inspector.ups(raw: raw, report: UPSHID.decode(raw, now: 0), readAge: 2, attached: true)
-        let j = try parse(Inspector.json(s.json))
-        XCTAssertEqual((j["rawValues"] as? [Any])?.count, 58, "every element as read, string indexes included")
-        XCTAssertEqual(j["product"] as? String, "CP1500PFCLCDa")
-        let decoded = try XCTUnwrap(j["decoded"] as? [String: Any])
-        XCTAssertEqual(decoded["ratedWatts"] as? Double, 1000)
-        XCTAssertEqual(decoded["flags"] as? [String], ["acPresent", "fullyCharged"])
-        let first = try XCTUnwrap((j["fields"] as? [[String: Any]])?.first)
-        XCTAssertNotNil(first["page"] as? String)
-        XCTAssertNotNil(first["raw"] as? Int)
+    func testUPSPageShowsTheWholeFullCapture() throws {
+        // The 2026-10-11 full capture: 158 elements (4 whose read fails), 10 collections,
+        // 76 reports, the descriptor and 47 properties. Every one is a row with its own key.
+        let raw = try fixture("cp1500pfclcda-full")
+        let s = Inspector.ups(raw: raw, report: UPSHID.decode(raw, now: 0), readAge: 1, attached: true)
+        func count(_ prefix: String) -> Int { s.rows.filter { $0.group?.hasPrefix(prefix) == true }.count }
+        XCTAssertEqual(count("Elements"), 158)
+        XCTAssertEqual(count("Collections"), 10)
+        XCTAssertEqual(count("Reports"), 76)
+        XCTAssertEqual(count("Report descriptor"), 1)
+        XCTAssertEqual(count("Device properties"), 47)
+        XCTAssertEqual(s.rows.count, 158 + 10 + 76 + 1 + 47)
+        XCTAssertEqual(Set(s.rows.map(\.key)).count, s.rows.count, "the feature and input copies of a usage are separate rows")
+        XCTAssertEqual(s.rows.filter { $0.value == "read failed (0xE0005000)" }.count, 4)
+        XCTAssertTrue(s.rows.contains { $0.label == "Charge (input-misc)" || $0.label == "Charge (input-button)" || $0.label.hasPrefix("Charge (") })
+        XCTAssertTrue(s.subtitle.hasPrefix("158 elements (4 failed) · 10 collections · 76 reports · read just now in"))
+    }
+
+    func testUPSJSONIsTheCaptureItself() throws {
+        for name in ["cp1500pfclcda", "cp1500pfclcda-full"] {
+            let raw = try fixture(name)
+            let s = Inspector.ups(raw: raw, report: UPSHID.decode(raw, now: 0), readAge: 2, attached: true)
+            let j = try parse(Inspector.json(s.json))
+            let capture = try XCTUnwrap(j["capture"])
+            let back = try JSONDecoder().decode(UPSHID.RawReport.self, from: JSONSerialization.data(withJSONObject: capture))
+            XCTAssertEqual(back, raw, "\(name): what Copy Page hands an agent is exactly what was read")
+            let decoded = try XCTUnwrap(j["decoded"] as? [String: Any])
+            XCTAssertEqual(decoded["ratedWatts"] as? Double, 1000)
+        }
     }
 
     func testUPSSectionWithoutAReport() {
