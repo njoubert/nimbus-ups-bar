@@ -21,6 +21,12 @@ import Foundation
 /// with a share point on it. Force only overrides dissenters and open files; the filesystem is
 /// flushed completely either way. The courtesy to apps is the *wait* in the soft phase, not a
 /// gentler unmount.
+///
+/// Two debounces keep a flaky signal from undoing the work: line power has to stay back for
+/// `Policy.lineStableSeconds` before the outage is over (a brownout transfers every few
+/// seconds), and the UPS has to be missing for `absentDebounce` before "the UPS is gone" is a
+/// hard limit (a USB re-enumeration drops it for a moment). In both windows the limits are
+/// judged against the last reading taken on battery.
 public final class OutageGuard {
 
     public enum Phase: String, Equatable, Sendable {
@@ -64,6 +70,10 @@ public final class OutageGuard {
         /// Countdown to the soft stage while holding, to the hard limit until safe.
         public var untilSoft: TimeInterval?
         public var untilHard: TimeInterval?
+        /// Line power is back; the outage stands down when this reaches zero, unless it fails again.
+        public var untilStandDown: TimeInterval?
+        /// The UPS has not been seen for this long during the outage (nil: it is there).
+        public var upsAbsentFor: TimeInterval?
         public var volumes: [VolumeReport] = []
         /// App names the soft phase is waiting for.
         public var waitingFor: [String] = []
@@ -78,17 +88,27 @@ public final class OutageGuard {
     public var policy: Policy { didSet { policy = policy.normalized } }
     /// Fired after every tick and after every completed action, on the ticking thread.
     public var onChange: (() -> Void)?
+    /// Set before the first tick by an app that was relaunched mid-outage: the outage it
+    /// finds itself in began this long ago, so the clock and the limits carry on from there
+    /// rather than from zero. Consumed by the next transfer, dropped by the next line reading.
+    public var resumeElapsed: TimeInterval?
 
     private let env: GuardEnvironment
     private var lastReading = UPSReading.absent()
+    private var lastBatteryReading = UPSReading.absent()
     private var outageStart: TimeInterval?
     private var phase: Phase = .line
+    private var softSince: TimeInterval?
+    private var lineSince: TimeInterval?
+    private var absentSince: TimeInterval?
     private var asked: [String: TimeInterval] = [:]
     private var inFlight: Set<String> = []
     private var unmountedByGuard: [String: VolumeState] = [:]
     private var volumeErrors: [String: String] = [:]
     private var holders: [String: (at: TimeInterval, list: [Holder])] = [:]
     private var lastMountAttempt: [String: TimeInterval] = [:]
+    private var lastUnmountFailure: [String: TimeInterval] = [:]
+    private var lastUnmountSuccess: [String: TimeInterval] = [:]
     private var userHard = false
     private var postponed: TimeInterval = 0
     private var noQuitThisOutage = false
@@ -99,10 +119,18 @@ public final class OutageGuard {
     private var lastOutageSeconds: TimeInterval?
     private var hardReasons: [String] = []
     /// How often a failed remount is retried.
-    static let mountRetry: TimeInterval = 30
+    public static let mountRetry: TimeInterval = 30
+    /// How long a volume whose unmount failed is left alone before the next attempt, and how
+    /// long a volume reported mounted right after a successful unmount is trusted to be on its
+    /// way out (Disk Arbitration's description change can trail the completion).
+    public static let unmountRetry: TimeInterval = 10
+    /// How long the UPS has to be missing mid-outage before that counts as the battery dying.
+    public static let absentDebounce: TimeInterval = 10
     /// Re-entrancy: an unmount or mount completion that lands while a tick is running (the
     /// fakes, and Disk Arbitration on a fast path) asks for one more evaluation at the end of
-    /// the tick rather than nesting one inside it.
+    /// the tick rather than nesting one inside it. Four rounds is the ceiling; the timer
+    /// brings the next look soon enough.
+    public static let maxRounds = 4
     private var ticking = false
     private var retick = false
 
@@ -124,7 +152,7 @@ public final class OutageGuard {
             retick = false
             evaluate(reading)
             rounds += 1
-        } while retick && rounds < 4
+        } while retick && rounds < Self.maxRounds
     }
 
     private func evaluate(_ reading: UPSReading) {
@@ -132,14 +160,38 @@ public final class OutageGuard {
         lastReading = reading
         let volumes = env.protectedVolumes()
         let mounted = volumes.filter(\.isMounted)
+
+        // What kind of reading is this, in the light of the outage so far?
+        let onBattery = reading.present && reading.onBattery
+        let onLine = reading.present && !reading.onBattery
+        if reading.present { absentSince = nil } else if outageStart != nil, absentSince == nil { absentSince = now }
+        if onBattery {
+            lastBatteryReading = reading
+            if let since = lineSince { env.log("line power failed again after \(Duration.text(now - since))") }
+            lineSince = nil
+        }
         // A UPS that disappears mid-outage has almost certainly run its battery down and
-        // switched off (the USB connection goes with it). That is the hardest of hard limits.
-        let upsGone = !reading.present && outageStart != nil
-        let inOutage = (reading.present && reading.onBattery) || upsGone
+        // switched off (the USB connection goes with it): the hardest of hard limits, once it
+        // has been gone long enough not to be a USB re-enumeration.
+        let absentFor = absentSince.map { now - $0 }
+        let upsGone = outageStart != nil && !reading.present && (absentFor ?? 0) >= Self.absentDebounce
+        let absentBlip = outageStart != nil && !reading.present && !upsGone
+        // Line power back: the outage stands down only once it has stayed back long enough.
+        var standingDown = false
+        if outageStart != nil, onLine {
+            if lineSince == nil {
+                lineSince = now
+                env.log("line power is back; standing down in \(Duration.text(policy.lineStableSeconds)) unless it fails again")
+            }
+            standingDown = now - (lineSince ?? now) < policy.lineStableSeconds
+        }
+        let inOutage = onBattery || upsGone || absentBlip || standingDown
 
         if inOutage {
             if outageStart == nil { beginOutage(now: now, reading: reading, mounted: mounted) }
             let elapsed = now - (outageStart ?? now)
+            // In a flap or a blip the limits are judged against the last reading on battery.
+            let judged = onBattery ? reading : lastBatteryReading
             if now - lastProgressLog >= 60 {
                 lastProgressLog = now
                 env.log("on battery \(Duration.text(elapsed)): \(describe(reading)); mounted: \(mounted.isEmpty ? "none" : mounted.map(\.name).joined(separator: ", "))")
@@ -150,16 +202,19 @@ public final class OutageGuard {
                     phase = .safe
                 }
                 hold(false)
-                maybeAfterSafe(elapsed: elapsed)
+                if !standingDown { maybeAfterSafe(elapsed: elapsed) }
             } else {
+                // Every tick, not just at the transfer: a volume mounted mid-outage, or one
+                // that Disk Arbitration reports only after a relaunch, needs the hold too.
+                hold(true)
                 let usable = elapsed >= policy.ignoreReadingsSeconds
                 var reasons: [String] = []
                 if upsGone { reasons.append("the UPS has gone away (battery exhausted?)") }
                 if userHard { reasons.append("unmount requested from the menu") }
                 if elapsed >= policy.hardAfterSeconds + postponed { reasons.append("\(Duration.text(elapsed)) on battery") }
-                if usable, let pct = reading.chargePercent, pct <= policy.hardAtPercent { reasons.append("charge at \(pct) %") }
-                if usable, let rt = reading.runtimeSeconds, rt <= policy.hardAtRuntimeSeconds { reasons.append("runtime down to \(Duration.text(TimeInterval(rt)))") }
-                if usable, reading.flags.contains(.shutdownImminent) { reasons.append("the UPS says shutdown is imminent") }
+                if usable, let pct = judged.chargePercent, pct <= policy.hardAtPercent { reasons.append("charge at \(pct) %") }
+                if usable, let rt = judged.runtimeSeconds, rt <= policy.hardAtRuntimeSeconds { reasons.append("runtime down to \(Duration.text(TimeInterval(rt)))") }
+                if usable, judged.flags.contains(.shutdownImminent) { reasons.append("the UPS says shutdown is imminent") }
                 hardReasons = reasons
                 if !reasons.isEmpty {
                     if phase != .hard {
@@ -168,11 +223,14 @@ public final class OutageGuard {
                         env.log("hard limit (\(reasons.joined(separator: "; "))): unmounting \(mounted.map(\.name).joined(separator: ", ")) regardless of apps")
                         env.notify(title: "Unmounting now", body: "\(reasons.first ?? "Hard limit"). \(mounted.map(\.name).joined(separator: ", ")) unmounting regardless of open apps.")
                     }
-                    for v in mounted where !inFlight.contains(v.uuid) { unmount(v) }
-                } else if elapsed >= policy.graceSeconds + postponed {
+                    for v in mounted where canUnmount(v, now: now) { unmount(v) }
+                } else if softSince != nil || elapsed >= policy.graceSeconds + postponed {
+                    // Once the soft stage has begun it stays begun: a postponement moves the
+                    // hard limit out, it does not un-ask the apps.
                     let quitting = policy.quitApps && !noQuitThisOutage
                     if phase != .soft {
                         phase = .soft
+                        softSince = now
                         env.log("grace period over (\(Duration.text(elapsed)) on battery): \(quitting ? "asking apps to quit, then unmounting" : "unmounting volumes no app is using (apps are not asked to quit)")")
                     }
                     refreshHolders(mounted, now: now)
@@ -192,9 +250,11 @@ public final class OutageGuard {
                             }
                         }
                         if apps.isEmpty {
-                            let others = otherHolders(v)
-                            env.log("no app holds \(v.name)\(others.isEmpty ? "" : " (ignoring \(others.map(\.shortName).joined(separator: ", ")))"): unmounting")
-                            unmount(v)
+                            if canUnmount(v, now: now) {
+                                let others = otherHolders(v)
+                                env.log("no app holds \(v.name)\(others.isEmpty ? "" : " (ignoring \(others.map(\.shortName).joined(separator: ", ")))"): unmounting")
+                                unmount(v)
+                            }
                         } else {
                             waiting += apps.map(\.shortName)
                         }
@@ -210,6 +270,7 @@ public final class OutageGuard {
             }
         } else {
             if outageStart != nil { endOutage(now: now, reading: reading) }
+            resumeElapsed = nil
             hardReasons = []
             // Remount whatever we unmounted, now that mains is back and the disks are still here.
             for v in volumes where unmountedByGuard[v.uuid] != nil {
@@ -225,7 +286,7 @@ public final class OutageGuard {
             }
             phase = inFlight.isEmpty ? .line : .restoring
         }
-        publish(now: now, volumes: volumes)
+        publish(now: now, volumes: volumes, standingDown: standingDown, absentFor: absentFor)
     }
 
     // MARK: Owner actions
@@ -268,26 +329,38 @@ public final class OutageGuard {
         let now = env.now
         let volumes = env.protectedVolumes()
         refreshHolders(volumes.filter(\.isMounted), now: now)
-        publish(now: now, volumes: volumes)
+        publish(now: now, volumes: volumes, standingDown: false, absentFor: absentSince.map { now - $0 })
     }
 
     // MARK: Transitions
 
     private func beginOutage(now: TimeInterval, reading: UPSReading, mounted: [VolumeState]) {
-        outageStart = now
+        let resumed = resumeElapsed
+        resumeElapsed = nil
+        outageStart = now - (resumed ?? 0)
         asked = [:]
         userHard = false
         postponed = 0
         noQuitThisOutage = false
         afterSafeDone = false
+        softSince = nil
+        lineSince = nil
+        absentSince = nil
+        lastUnmountFailure = [:]
+        lastUnmountSuccess = [:]
         lastWaiting = []
         lastProgressLog = now
+        if reading.present { lastBatteryReading = reading }
         phase = .holding
-        env.log("transfer to battery: \(describe(reading)); mounted: \(mounted.isEmpty ? "none" : mounted.map(\.name).joined(separator: ", "))")
         let what = mounted.isEmpty ? "No protected volume is mounted."
-            : "\(mounted.map(\.name).joined(separator: ", ")) unmount\(mounted.count == 1 ? "s" : "") in \(Duration.text(policy.graceSeconds)) unless power returns."
-        env.notify(title: "Power outage", body: "\(describeShort(reading)). \(what)")
-        if !mounted.isEmpty { hold(true) }
+            : "\(mounted.map(\.name).joined(separator: ", ")) unmount\(mounted.count == 1 ? "s" : "") in \(Duration.text(max(0, policy.graceSeconds - (resumed ?? 0)))) unless power returns."
+        if let resumed {
+            env.log("resuming an outage that began \(Duration.text(resumed)) ago (relaunched mid-outage): \(describe(reading)); mounted: \(mounted.isEmpty ? "none" : mounted.map(\.name).joined(separator: ", "))")
+            env.notify(title: "Power outage (resumed)", body: "On battery for \(Duration.text(resumed)) already. \(describeShort(reading)). \(what)")
+        } else {
+            env.log("transfer to battery: \(describe(reading)); mounted: \(mounted.isEmpty ? "none" : mounted.map(\.name).joined(separator: ", "))")
+            env.notify(title: "Power outage", body: "\(describeShort(reading)). \(what)")
+        }
     }
 
     private func endOutage(now: TimeInterval, reading: UPSReading) {
@@ -298,9 +371,14 @@ public final class OutageGuard {
                    + (unmountedByGuard.isEmpty ? "" : " Remounting \(unmountedByGuard.values.map(\.name).sorted().joined(separator: ", "))."))
         hold(false)
         outageStart = nil
+        softSince = nil
+        lineSince = nil
+        absentSince = nil
         asked = [:]
         lastWaiting = []
         lastMountAttempt = [:]
+        lastUnmountFailure = [:]
+        lastUnmountSuccess = [:]
     }
 
     private func maybeAfterSafe(elapsed: TimeInterval) {
@@ -334,6 +412,15 @@ public final class OutageGuard {
         (holders[v.uuid]?.list ?? []).filter { !$0.isApp || policy.isNeverQuit($0) }
     }
 
+    /// Not in flight, not within the backoff after a failure, and not just unmounted (the
+    /// registry may report it mounted for a moment longer than the completion).
+    private func canUnmount(_ v: VolumeState, now: TimeInterval) -> Bool {
+        if inFlight.contains(v.uuid) { return false }
+        if let f = lastUnmountFailure[v.uuid], now - f < Self.unmountRetry { return false }
+        if let s = lastUnmountSuccess[v.uuid], now - s < Self.unmountRetry { return false }
+        return true
+    }
+
     private func unmount(_ v: VolumeState) {
         inFlight.insert(v.uuid)
         env.unmount(v) { [weak self] result in
@@ -343,12 +430,19 @@ public final class OutageGuard {
             case .success:
                 self.unmountedByGuard[v.uuid] = v
                 self.volumeErrors.removeValue(forKey: v.uuid)
+                self.lastUnmountFailure.removeValue(forKey: v.uuid)
+                self.lastUnmountSuccess[v.uuid] = self.env.now
                 self.holders.removeValue(forKey: v.uuid)
                 self.env.log("unmounted \(v.name) (\(v.bsdName ?? "?"))")
                 self.env.notify(title: "\(v.name) unmounted", body: "Safe to lose power. The Mac keeps running on its own battery.")
             case .failure(let e):
+                let first = self.lastUnmountFailure[v.uuid] == nil
+                self.lastUnmountFailure[v.uuid] = self.env.now
                 self.volumeErrors[v.uuid] = e.message
-                self.env.log("unmount of \(v.name) failed: \(e.message)")
+                self.env.log("unmount of \(v.name) failed: \(e.message); retrying every \(Int(Self.unmountRetry)) s")
+                if first {
+                    self.env.notify(title: "\(v.name) will not unmount", body: "\(e.message). Retrying every \(Int(Self.unmountRetry)) s; its files are still at risk.")
+                }
             }
             self.completed()
         }
@@ -381,7 +475,7 @@ public final class OutageGuard {
 
     // MARK: Status
 
-    private func publish(now: TimeInterval, volumes: [VolumeState]) {
+    private func publish(now: TimeInterval, volumes: [VolumeState], standingDown: Bool, absentFor: TimeInterval?) {
         var s = Status()
         s.phase = outageStart == nil ? (inFlight.isEmpty ? .line : .restoring) : phase
         s.upsPresent = lastReading.present
@@ -392,6 +486,8 @@ public final class OutageGuard {
             let elapsed = now - start
             if phase == .holding { s.untilSoft = max(0, policy.graceSeconds + postponed - elapsed) }
             if phase != .safe { s.untilHard = max(0, policy.hardAfterSeconds + postponed - elapsed) }
+            if standingDown, let since = lineSince { s.untilStandDown = max(0, policy.lineStableSeconds - (now - since)) }
+            s.upsAbsentFor = absentFor
         }
         s.volumes = volumes.map { v in
             VolumeReport(volume: v,

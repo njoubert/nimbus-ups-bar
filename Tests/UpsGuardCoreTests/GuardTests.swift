@@ -23,13 +23,24 @@ final class FakeEnvironment: GuardEnvironment {
     /// Defer completions until `flush()` to model the asynchronous Disk Arbitration callbacks.
     var deferCompletions = false
     private var pending: [() -> Void] = []
+    /// Run on every `protectedVolumes()` call: a hook for re-entering the guard mid-tick.
+    var onProtectedVolumes: (() -> Void)?
+    var protectedVolumesCalls = 0
+    /// When set, a completion reports success but the volume's state only flips at the next
+    /// `settle()`: Disk Arbitration's description change trailing the completion.
+    var lagsState = false
+    private var lagged: [() -> Void] = []
 
     func add(_ v: VolumeState, holders: [Holder] = []) {
         volumes[v.uuid] = v
         holderLists[v.uuid] = holders
     }
 
-    func protectedVolumes() -> [VolumeState] { volumes.values.sorted { $0.name < $1.name } }
+    func protectedVolumes() -> [VolumeState] {
+        protectedVolumesCalls += 1
+        onProtectedVolumes?()
+        return volumes.values.sorted { $0.name < $1.name }
+    }
     func holders(of volume: VolumeState) -> [Holder] { holderLists[volume.uuid] ?? [] }
     func requestQuit(_ holder: Holder) {
         quits.append(holder.appKey)
@@ -41,7 +52,7 @@ final class FakeEnvironment: GuardEnvironment {
         unmounts.append(volume.name)
         let done = { [self] in
             if unmountFails.contains(volume.uuid) { completion(.failure(GuardError("dissented by smbd"))); return }
-            var v = volumes[volume.uuid]!; v.mountPoint = nil; volumes[volume.uuid] = v
+            setState(volume.uuid) { $0.mountPoint = nil }
             completion(.success(()))
         }
         if deferCompletions { pending.append(done) } else { done() }
@@ -50,12 +61,18 @@ final class FakeEnvironment: GuardEnvironment {
         mounts.append(volume.name)
         let done = { [self] in
             if mountFails.contains(volume.uuid) { completion(.failure(GuardError("not attached"))); return }
-            var v = volumes[volume.uuid]!; v.mountPoint = "/Volumes/\(v.name)"; volumes[volume.uuid] = v
+            setState(volume.uuid) { $0.mountPoint = "/Volumes/\($0.name)" }
             completion(.success(()))
         }
         if deferCompletions { pending.append(done) } else { done() }
     }
+    private func setState(_ uuid: String, _ change: @escaping (inout VolumeState) -> Void) {
+        let apply = { [self] in var v = volumes[uuid]!; change(&v); volumes[uuid] = v }
+        if lagsState { lagged.append(apply) } else { apply() }
+    }
     func flush() { let p = pending; pending = []; p.forEach { $0() } }
+    /// The lagging state catches up with the completions.
+    func settle() { let l = lagged; lagged = []; l.forEach { $0() } }
     func setAwakeHold(_ on: Bool) { awake.append(on) }
     func notify(title: String, body: String) { notifications.append(title) }
     func perform(_ action: Policy.AfterSafe) { performed.append(action) }
@@ -114,12 +131,15 @@ final class GuardTests: XCTestCase {
         XCTAssertEqual(env.awake, [true])
         XCTAssertEqual(guardian.status.untilSoft!, 75, accuracy: 0.01)
         run(ac(), for: 5)
+        XCTAssertEqual(guardian.status.phase, .holding, "line power has to stay back before the outage is over")
+        XCTAssertEqual(guardian.status.untilStandDown!, 30, accuracy: 0.01, "counted from the first reading on line")
+        run(ac(), for: 30)
         XCTAssertEqual(guardian.status.phase, .line)
         XCTAssertTrue(env.unmounts.isEmpty)
         XCTAssertTrue(env.quits.isEmpty)
         XCTAssertEqual(env.awake, [true, false])
         XCTAssertEqual(env.notifications, ["Power outage", "Power restored"])
-        XCTAssertEqual(guardian.status.lastOutageSeconds!, 50, accuracy: 0.01)   // the restoring tick lands 5 s later
+        XCTAssertEqual(guardian.status.lastOutageSeconds!, 80, accuracy: 0.01)   // 45 s on battery, then 30 s of line power to be sure
     }
 
     func testSoftStageQuitsAppThenUnmountsThenRemounts() {
@@ -137,8 +157,8 @@ final class GuardTests: XCTestCase {
         XCTAssertEqual(guardian.status.phase, .safe)
         XCTAssertEqual(env.awake, [true, false])
         XCTAssertTrue(env.performed.isEmpty)           // keepRunning
-        // Power back: remount.
-        run(ac(), for: 5)
+        // Power back, and staying back: remount.
+        run(ac(), for: 35)
         XCTAssertEqual(env.mounts, ["Flitslig"])
         XCTAssertEqual(guardian.status.phase, .line)
         XCTAssertTrue(env.volumes["B2D1"]!.isMounted)
@@ -195,11 +215,15 @@ final class GuardTests: XCTestCase {
         guardian.tick(ac())
         run(battery(), for: 30)
         run(.absent(), for: 5)
+        XCTAssertTrue(env.unmounts.isEmpty, "a USB re-enumeration drops the UPS for a moment; that is not the battery dying")
+        XCTAssertEqual(guardian.status.phase, .holding)
+        XCTAssertEqual(guardian.status.upsAbsentFor!, 0, accuracy: 0.01, "counted from the first absent reading")
+        run(.absent(), for: 10)                       // gone for 10 s now
         XCTAssertEqual(env.unmounts, ["Flitslig"])
         XCTAssertEqual(guardian.status.phase, .safe)
         XCTAssertFalse(guardian.status.upsPresent)
-        // The UPS comes back on line power: outage over, remount.
-        run(ac(), for: 5)
+        // The UPS comes back on line power: outage over once that holds, remount.
+        run(ac(), for: 35)
         XCTAssertEqual(env.mounts, ["Flitslig"])
         XCTAssertEqual(guardian.status.phase, .line)
     }
@@ -220,7 +244,7 @@ final class GuardTests: XCTestCase {
         run(battery(), for: 5)
         XCTAssertEqual(guardian.status.phase, .safe)
         XCTAssertTrue(env.awake.isEmpty, "no hold when there is nothing to unmount")
-        run(ac(), for: 5)
+        run(ac(), for: 30)
         XCTAssertTrue(env.mounts.isEmpty, "we did not unmount it, so we do not remount it")
     }
 
@@ -325,10 +349,11 @@ final class GuardTests: XCTestCase {
         onBattery(until: 120)
         XCTAssertEqual(guardian.status.volumes[0].lastError, "dissented by smbd")
         XCTAssertEqual(guardian.status.phase, .soft)
-        onBattery(until: 130)
-        XCTAssertGreaterThan(env.unmounts.count, 1, "keeps trying")
-        env.unmountFails = []
         onBattery(until: 135)
+        XCTAssertEqual(env.unmounts.count, 2, "keeps trying, every 10 s rather than every tick")
+        XCTAssertEqual(env.notifications.filter { $0.hasSuffix("will not unmount") }.count, 1, "told once")
+        env.unmountFails = []
+        onBattery(until: 145)
         XCTAssertEqual(guardian.status.phase, .safe)
     }
 
@@ -338,7 +363,7 @@ final class GuardTests: XCTestCase {
         onBattery(until: 120)
         XCTAssertEqual(guardian.status.phase, .safe)
         env.mountFails = ["B2D1"]
-        run(ac(), for: 5)
+        run(ac(), for: 35)
         XCTAssertEqual(env.mounts, ["Flitslig"])
         XCTAssertEqual(guardian.status.phase, .line)
         run(ac(), for: 20)
@@ -356,7 +381,7 @@ final class GuardTests: XCTestCase {
         guardian.tick(ac())
         onBattery(until: 120)
         var v = env.volumes["B2D1"]!; v.isAttached = false; v.bsdName = nil; env.volumes["B2D1"] = v
-        run(ac(), for: 120)
+        run(ac(), for: 150)
         XCTAssertTrue(env.mounts.isEmpty, "cannot mount a disk that is not there")
         XCTAssertEqual(guardian.status.phase, .line)
         XCTAssertTrue(guardian.status.volumes[0].unmountedByGuard)
@@ -370,12 +395,237 @@ final class GuardTests: XCTestCase {
         env.quitsWhenAsked = [lightroom.appKey]
         guardian.tick(ac())
         onBattery(until: 130)
-        run(ac(), for: 5)
+        run(ac(), for: 35)
         env.holderLists["B2D1"] = [lightroom]       // Lightroom reopened the catalog
         onBattery(until: 60)
         XCTAssertEqual(guardian.status.phase, .holding, "the clock restarted")
         onBattery(until: 125)
         XCTAssertEqual(env.quits, [lightroom.appKey, lightroom.appKey], "asked again in the new outage")
+    }
+
+    // MARK: Flaky signals
+
+    func testFlappingMainsKeepsTheOutageAndItsLimits() {
+        // A brownout: 10 s on battery, 4 s on line, over and over, with the charge falling.
+        // Before the hysteresis every flap reset the clock and the limits; the battery drained
+        // with nothing protected and two notifications per flap.
+        guardian.policy = Policy(hardAfterSeconds: 3600)
+        env.add(flitslig, holders: [lightroom])
+        guardian.tick(ac())
+        var charge = 95
+        var t: TimeInterval = 0
+        while t < 14 * 60, env.unmounts.isEmpty {
+            for _ in 0..<5 { env.now += 2; t += 2; guardian.tick(battery(charge)) }
+            for _ in 0..<2 { env.now += 2; t += 2; guardian.tick(ac(charge)) }
+            charge = max(20, charge - 1)
+        }
+        XCTAssertEqual(env.unmounts, ["Flitslig"], "the charge limit fired")
+        XCTAssertTrue(guardian.status.hardReasons.contains { $0.hasPrefix("charge at") }, "\(guardian.status.hardReasons)")
+        XCTAssertEqual(env.quits, [lightroom.appKey], "asked once, at the end of one grace period, not once per flap")
+        XCTAssertEqual(env.notifications.filter { $0 == "Power outage" }.count, 1)
+        XCTAssertEqual(env.notifications.filter { $0 == "Power restored" }.count, 0)
+        XCTAssertLessThan(t, 14 * 60, "it did not take the whole brownout")
+    }
+
+    func testLimitsAreJudgedAgainstTheLastBatteryReadingDuringAFlap() {
+        env.add(flitslig)
+        guardian.tick(ac())
+        onBattery(until: 60, battery(55))
+        run(ac(100), for: 4)                          // line back, and the UPS reports 100 % again at once
+        run(battery(45), for: 2)                      // 45 % on the next reading on battery
+        XCTAssertEqual(env.unmounts, ["Flitslig"])
+    }
+
+    func testLinePowerHasToStayBackBeforeStandingDown() {
+        env.add(flitslig, holders: [lightroom])
+        guardian.tick(ac())
+        onBattery(until: 60)
+        run(ac(), for: 20)                            // readings on line at 65, 70, 75, 80 s
+        XCTAssertEqual(guardian.status.phase, .holding)
+        XCTAssertEqual(guardian.status.untilStandDown!, 15, accuracy: 0.01)
+        XCTAssertTrue(env.lines.contains { $0.hasPrefix("line power is back; standing down in 30 s") })
+        run(battery(), for: 5)                        // …and it fails again, at 85 s
+        XCTAssertNil(guardian.status.untilStandDown)
+        XCTAssertTrue(env.lines.contains { $0.hasPrefix("line power failed again after 20 s") }, "\(env.lines.suffix(3))")
+        run(ac(), for: 35)                            // line at 90 s, trusted at 120 s
+        XCTAssertEqual(guardian.status.phase, .line)
+        XCTAssertEqual(env.notifications, ["Power outage", "Power restored"])
+        XCTAssertEqual(guardian.status.lastOutageSeconds!, 120, accuracy: 0.01)
+    }
+
+    func testAfterSafeDoesNotRunWhilePowerIsBackButNotYetTrusted() {
+        guardian.policy.afterSafe = .sleep
+        var v = flitslig; v.mountPoint = nil
+        env.add(v)
+        guardian.tick(ac())
+        onBattery(until: 115)
+        XCTAssertEqual(guardian.status.phase, .safe)
+        run(ac(), for: 20)                            // the grace period ends while mains is back but not yet trusted
+        XCTAssertTrue(env.performed.isEmpty, "no sleeping the Mac while the power may well be back")
+        run(battery(), for: 5)                        // it was not
+        XCTAssertEqual(env.performed, [.sleep])
+    }
+
+    func testVolumeMountedMidOutageGetsTheSleepHold() {
+        var v = flitslig; v.mountPoint = nil
+        env.add(v)
+        guardian.tick(ac())
+        onBattery(until: 30)
+        XCTAssertEqual(guardian.status.phase, .safe)
+        XCTAssertTrue(env.awake.isEmpty)
+        var m = env.volumes["B2D1"]!; m.mountPoint = "/Volumes/Flitslig"; env.volumes["B2D1"] = m
+        onBattery(until: 35)
+        XCTAssertEqual(guardian.status.phase, .holding)
+        XCTAssertEqual(env.awake, [true], "the hold follows the volumes, not the transfer")
+        onBattery(until: 125)
+        XCTAssertEqual(env.unmounts, ["Flitslig"])
+        XCTAssertEqual(env.awake, [true, false])
+    }
+
+    func testRelaunchMidOutageResumesTheClock() {
+        // A crash-restart: the new copy learns from UserDefaults that the outage began 200 s
+        // ago, its first tick runs before Disk Arbitration's replay (no volumes), the second
+        // sees Flitslig.
+        guardian.resumeElapsed = 200
+        guardian.tick(battery())
+        XCTAssertEqual(guardian.status.phase, .safe, "nothing to protect yet")
+        XCTAssertEqual(guardian.status.elapsed, 200, accuracy: 0.01)
+        XCTAssertEqual(env.notifications, ["Power outage (resumed)"])
+        env.add(flitslig, holders: [lightroom])
+        env.now += 2
+        guardian.tick(battery())
+        XCTAssertEqual(guardian.status.phase, .soft, "202 s in: the grace period is long over")
+        XCTAssertEqual(env.quits, [lightroom.appKey])
+        XCTAssertEqual(env.awake, [true])
+        XCTAssertEqual(guardian.status.untilHard!, 98, accuracy: 0.01)
+    }
+
+    func testResumeIsDroppedByALineReading() {
+        env.add(flitslig)
+        guardian.resumeElapsed = 200
+        guardian.tick(ac())                           // launched after the power came back
+        XCTAssertNil(guardian.resumeElapsed)
+        onBattery(until: 60)
+        XCTAssertEqual(guardian.status.phase, .holding, "a later outage starts from zero")
+    }
+
+    func testPowerReturnsRemountInFlightThenFailsAgain() {
+        env.add(flitslig)
+        guardian.tick(ac())
+        onBattery(until: 120)
+        XCTAssertEqual(guardian.status.phase, .safe)
+        env.deferCompletions = true
+        run(ac(), for: 35)                            // stands down; the remount is in flight
+        XCTAssertEqual(guardian.status.phase, .restoring)
+        XCTAssertEqual(env.mounts, ["Flitslig"])
+        run(battery(), for: 5)                        // and the power fails again
+        XCTAssertEqual(guardian.status.phase, .holding, "a new outage; the mount is still in flight")
+        XCTAssertEqual(env.notifications.filter { $0 == "Power outage" }.count, 2)
+        env.flush()                                   // the mount lands mid-outage
+        env.deferCompletions = false
+        XCTAssertTrue(env.volumes["B2D1"]!.isMounted)
+        onBattery(until: 125)
+        XCTAssertEqual(env.unmounts, ["Flitslig", "Flitslig"], "unmounted again at this outage's grace")
+        XCTAssertEqual(guardian.status.phase, .safe)
+    }
+
+    func testSafeOnlyWhenEveryVolumeHasLanded() {
+        let second = VolumeState(uuid: "C3E2", name: "Archive", bsdName: "disk10s1", mountPoint: "/Volumes/Archive")
+        env.add(flitslig)
+        env.add(second)
+        env.unmountFails = ["B2D1"]
+        env.deferCompletions = true
+        guardian.tick(ac())
+        onBattery(until: 120)
+        XCTAssertEqual(Set(env.unmounts), ["Flitslig", "Archive"])
+        XCTAssertEqual(guardian.status.phase, .soft)
+        env.flush()                                   // Archive lands, Flitslig fails
+        XCTAssertNotEqual(guardian.status.phase, .safe)
+        XCTAssertEqual(guardian.status.volumes.first { $0.volume.name == "Flitslig" }?.lastError, "dissented by smbd")
+        env.unmountFails = []
+        onBattery(until: 135)                         // the retry, 10 s after the failure
+        env.flush()
+        XCTAssertEqual(guardian.status.phase, .safe)
+        XCTAssertEqual(env.unmounts.count, 3)
+    }
+
+    func testPolicyChangedMidOutageAppliesAtOnce() {
+        env.add(flitslig, holders: [lightroom])
+        guardian.tick(ac())
+        onBattery(until: 60)
+        XCTAssertEqual(guardian.status.phase, .holding)
+        guardian.policy.graceSeconds = 30
+        onBattery(until: 65)
+        XCTAssertEqual(guardian.status.phase, .soft, "a shorter grace is already over")
+        XCTAssertEqual(env.quits, [lightroom.appKey])
+        guardian.policy.hardAfterSeconds = 10         // below the grace: normalized up to it
+        XCTAssertEqual(guardian.policy.hardAfterSeconds, 30)
+        onBattery(until: 70)
+        XCTAssertEqual(env.unmounts, ["Flitslig"], "the hard limit is behind us too")
+    }
+
+    func testPostponeDuringSoftKeepsThePhase() {
+        env.add(flitslig, holders: [lightroom])
+        guardian.tick(ac())
+        onBattery(until: 125)
+        XCTAssertEqual(guardian.status.phase, .soft)
+        guardian.postpone(seconds: 300)
+        XCTAssertEqual(guardian.status.phase, .soft, "the apps have been asked; that is not undone")
+        XCTAssertNil(guardian.status.untilSoft)
+        XCTAssertEqual(guardian.status.untilHard!, 475, accuracy: 0.01)
+        env.holderLists["B2D1"] = []                  // Lightroom lets go during the postponement
+        onBattery(until: 130)
+        XCTAssertEqual(env.unmounts, ["Flitslig"], "the soft stage keeps working")
+    }
+
+    func testReentrantTicksAreCapped() {
+        env.add(flitslig)
+        guardian.tick(ac())
+        // Something re-enters the guard from inside every evaluation (a completion that lands
+        // synchronously, a callback that ticks): the tick must end, not recurse.
+        env.onProtectedVolumes = { [weak self] in self?.guardian.tick(self!.battery()) }
+        env.protectedVolumesCalls = 0
+        env.now += 5
+        guardian.tick(battery())
+        XCTAssertEqual(env.protectedVolumesCalls, OutageGuard.maxRounds)
+        XCTAssertEqual(guardian.status.phase, .holding)
+    }
+
+    func testVolumeStateLaggingBehindTheCompletionIsNotUnmountedTwice() {
+        env.lagsState = true
+        env.add(flitslig)
+        guardian.tick(ac())
+        onBattery(until: 120)                         // unmount completes; the registry still says mounted
+        XCTAssertEqual(env.unmounts, ["Flitslig"])
+        XCTAssertNotEqual(guardian.status.phase, .safe)
+        onBattery(until: 125)
+        XCTAssertEqual(env.unmounts, ["Flitslig"], "not asked again while the state catches up")
+        env.settle()
+        onBattery(until: 130)
+        XCTAssertEqual(guardian.status.phase, .safe)
+        // And on the way back: the description change can land before the mount completion.
+        env.lagsState = false
+        env.deferCompletions = true
+        run(ac(), for: 35)
+        XCTAssertEqual(env.mounts, ["Flitslig"])
+        var v = env.volumes["B2D1"]!; v.mountPoint = "/Volumes/Flitslig"; env.volumes["B2D1"] = v
+        run(ac(), for: 2)
+        XCTAssertFalse(guardian.status.volumes[0].unmountedByGuard, "mounted is mounted, whoever says so first")
+        env.flush()
+        XCTAssertEqual(guardian.status.phase, .line)
+        XCTAssertEqual(env.mounts.count, 1)
+    }
+
+    func testHelperProcessOfAnAskedAppIsNotAskedAgain() {
+        let renderer = Holder(pid: 4242,
+                              executable: "/Applications/Brave Browser.app/Contents/Frameworks/Brave Browser Framework.framework/Versions/1/Helpers/Brave Browser Helper (Renderer).app/Contents/MacOS/Brave Browser Helper (Renderer)",
+                              appName: "Brave Browser", bundleID: "com.brave.Browser")
+        let brave = Holder(pid: 4200, executable: "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser", appName: "Brave Browser", bundleID: "com.brave.Browser")
+        env.add(flitslig, holders: [renderer, brave])
+        guardian.tick(ac())
+        onBattery(until: 125)
+        XCTAssertEqual(env.quits, [renderer.appKey], "one ask per app, whichever process was listed first")
+        XCTAssertEqual(guardian.status.waitingFor, ["Brave Browser"])
     }
 
     // MARK: Rehearsal and simulation

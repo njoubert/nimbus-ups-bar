@@ -19,6 +19,10 @@ public struct Policy: Equatable, Sendable {
     /// Charge and runtime are ignored this long after the transfer: some UPSes report 0 % or
     /// a nonsense runtime for the first seconds on battery.
     public var ignoreReadingsSeconds: TimeInterval
+    /// Line power has to stay back this long before the outage is over. Under a brownout the
+    /// UPS transfers every few seconds; without this every flap would reset the clock, the
+    /// limits and the ask, and the battery would drain with nothing protected.
+    public var lineStableSeconds: TimeInterval
     /// Send the apps holding files a quit event at the soft stage (the same thing as choosing
     /// Quit from their menu; an app with unsaved work shows its own dialog). Off means apps
     /// are never asked and the volumes wait for the hard limit.
@@ -41,13 +45,14 @@ public struct Policy: Equatable, Sendable {
     }
 
     public init(graceSeconds: TimeInterval = 120, hardAfterSeconds: TimeInterval = 300, hardAtPercent: Int = 50,
-                hardAtRuntimeSeconds: Int = 600, ignoreReadingsSeconds: TimeInterval = 15, quitApps: Bool = true,
-                neverQuit: Set<String> = [], afterSafe: AfterSafe = .keepRunning) {
+                hardAtRuntimeSeconds: Int = 600, ignoreReadingsSeconds: TimeInterval = 15, lineStableSeconds: TimeInterval = 30,
+                quitApps: Bool = true, neverQuit: Set<String> = [], afterSafe: AfterSafe = .keepRunning) {
         self.graceSeconds = graceSeconds
         self.hardAfterSeconds = hardAfterSeconds
         self.hardAtPercent = hardAtPercent
         self.hardAtRuntimeSeconds = hardAtRuntimeSeconds
         self.ignoreReadingsSeconds = ignoreReadingsSeconds
+        self.lineStableSeconds = lineStableSeconds
         self.quitApps = quitApps
         self.neverQuit = neverQuit.union(Policy.alwaysKept)
         self.afterSafe = afterSafe
@@ -68,6 +73,7 @@ public struct Policy: Equatable, Sendable {
         p.hardAtPercent = min(100, max(0, p.hardAtPercent))
         p.hardAtRuntimeSeconds = max(0, p.hardAtRuntimeSeconds)
         p.ignoreReadingsSeconds = max(0, p.ignoreReadingsSeconds)
+        p.lineStableSeconds = max(0, p.lineStableSeconds)
         return p
     }
 }
