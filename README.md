@@ -190,7 +190,7 @@ hosts it ever talks to.
   every 2 s on battery; both from Settings), keeps the chart's samples, and runs simulations.
 - `swift test` runs 76 outage scenarios against a fake desk (flapping mains, a UPS that drops off
   USB for a moment or for good, a relaunch mid-outage, a volume that refuses to unmount, two volumes
-  landing at different times, each stage on each condition, every rehearsal scenario end to end, …) and 45 checks of the platform layer against fixtures, among them a raw
+  landing at different times, each stage on each condition, every rehearsal scenario end to end, …) and 47 checks of the platform layer against fixtures, among them a raw
   dump of the CP1500's 58 HID elements, so the decode, the health rules and the volume filter are
   checked in CI with no hardware attached.
 

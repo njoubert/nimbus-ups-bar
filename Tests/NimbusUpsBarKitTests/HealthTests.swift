@@ -1,5 +1,6 @@
 // Copyright (C) 2026 Niels Joubert
 // SPDX-License-Identifier: GPL-3.0-or-later
+import AppKit
 import XCTest
 @testable import NimbusUpsBarKit
 import UpsGuardCore
@@ -178,5 +179,42 @@ final class HealthTests: XCTestCase {
         XCTAssertEqual(Health.headline(items)?.text, "c", "the first at the top level")
         XCTAssertNil(Health.headline([Health.Item(.good, "a"), Health.Item(.info, "b")]), "notes colour nothing")
         XCTAssertEqual(Health.overall([]), .good)
+    }
+
+    /// Every warning and fault, provoked one way or another, for the label checks below.
+    func everyConcern() -> [Health.Item] {
+        var out: [Health.Item] = []
+        out += assess(.absent(), upsSeen: true)
+        out += assess(.absent(), upsSeen: false)
+        var r = fine(); r.onBattery = true; r.flags = [.discharging, .needsReplacement, .overload, .shutdownImminent]; out += assess(r)
+        for t in [UPSReading.SelfTest.error, .warning, .aborted] { r = fine(); r.selfTest = t; out += assess(r) }
+        r = fine(); r.chargePercent = 12; out += assess(r)
+        r = fine(); r.flags = [.acPresent]; r.batteryVoltage = 23.9; out += assess(r)
+        r = fine(); r.loadPercent = 0; out += assess(r)
+        r = fine(); r.loadPercent = 105; r.loadWatts = 1050; out += assess(r)
+        r = fine(); r.runtimeSeconds = 590; out += assess(r)
+        r = fine(); r.inputVoltage = 142; out += assess(r)
+        r = fine(); r.inputVoltage = 137; r.flags = [.acPresent, .boost, .buck]; out += assess(r)
+        out += assess(fine(), hidAge: 3600)
+        out += assess(fine(), hidAttached: false)
+        out += assess(fine(), internalBattery: PowerSources.InternalBattery(percent: 15, isCharging: false, onAC: false))
+        return out.filter(\.level.isConcern)
+    }
+
+    func testEveryConcernHasAShortLabel() {
+        let concerns = everyConcern()
+        XCTAssertGreaterThanOrEqual(Set(concerns.map(\.text)).count, 20, "the provocations reach every rule")
+        for c in concerns { XCTAssertNotNil(c.short, "\(c.text) has no short label for the menu row") }
+    }
+
+    func testEveryMenuRowFitsTheMenu() {
+        // The menu is as wide as the chart (340 pt); a row loses about 70 pt to its dot, its
+        // margins and the submenu arrow. A longer title widens the whole menu.
+        let font = NSFont.menuFont(ofSize: 0)
+        for c in everyConcern() + [Health.Item(.good, "healthy")] {
+            let title = "UPS Health: " + c.label
+            let width = (title as NSString).size(withAttributes: [.font: font]).width
+            XCTAssertLessThanOrEqual(width, 260, "\(title) is \(Int(width)) pt")
+        }
     }
 }
