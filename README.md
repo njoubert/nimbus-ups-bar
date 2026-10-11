@@ -117,7 +117,8 @@ any moment. Then:
   shut down) by the three conditions (time on battery, runtime left, charge), each a checkbox and a
   figure (the charge gauge on this UPS is voltage-derived, see below); whether apps are asked to
   quit and, optionally, how long they get before their volume is unmounted anyway; sleep or shut
-  down, and whether also as soon as the drives are safe; what a missing UPS means, during an outage
+  down, and whether also as soon as the drives are safe; what the outage menu's *Postpone* adds;
+  what a missing UPS means, during an outage
   and on line power, and after how long; and the apps never asked to quit, picked from the running
   apps or typed as a bundle id or name. Durations are typed as written everywhere else: `90 s`,
   `2 min`, `1 h 30 min`.
@@ -128,8 +129,7 @@ any moment. Then:
   with the menu open (2 s; also the guard's clock); how long charge and runtime are ignored after
   the transfer and how long power must stay back before an outage is over; how much history the
   chart shows (30 min to 24 h); the load in the menu bar.
-- **General**: run in the background at login, notifications, automatic update checks, what
-  *Postpone* adds, the log.
+- **General**: run in the background at login, notifications, automatic update checks, the log.
 
 **Health.** The health row and the headline name the first thing that is wrong, not just that
 something is. Red: no UPS on USB, the replace-battery flag, an overload, a failed self-test,

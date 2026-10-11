@@ -40,7 +40,7 @@ final class Settings {
         static let history = "chartHistorySeconds"
         static let postpone = "postponeSeconds"
         static let policyKeys = [ignoreReadings, lineStable, quitApps, quitTimeout, quitTimeoutOn, neverQuit,
-                                 powerDownWhenSafe, powerDownAction, upsGone, upsGoneInOutage, upsGoneInOutagePowersDown, upsGoneOnLine]
+                                 powerDownWhenSafe, powerDownAction, upsGone, upsGoneInOutage, upsGoneInOutagePowersDown, upsGoneOnLine, postpone]
             + Stage.allCases.flatMap { st in Condition.allCases.flatMap { c in [st.key(c), st.key(c) + "On"] } }
         static let readingKeys = [lineRead, busyRead, history, showLoadInBar, ignoreReadings, lineStable]
     }
