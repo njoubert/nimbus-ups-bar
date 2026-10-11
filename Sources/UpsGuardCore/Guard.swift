@@ -70,6 +70,11 @@ public final class OutageGuard {
         /// Countdown to the soft stage while holding, to the hard limit until safe.
         public var untilSoft: TimeInterval?
         public var untilHard: TimeInterval?
+        /// Countdown to the first volume being forced because its apps did not quit in time
+        /// (soft stage, only with a quit timeout in the policy).
+        public var untilQuitTimeout: TimeInterval?
+        /// The sooner of `untilHard` and `untilQuitTimeout`: when something is next forced.
+        public var untilForce: TimeInterval? { [untilHard, untilQuitTimeout].compactMap { $0 }.min() }
         /// Line power is back; the outage stands down when this reaches zero, unless it fails again.
         public var untilStandDown: TimeInterval?
         /// The UPS has not been seen for this long during the outage (nil: it is there).
@@ -212,8 +217,8 @@ public final class OutageGuard {
                 if upsGone { reasons.append("the UPS has gone away (battery exhausted?)") }
                 if userHard { reasons.append("unmount requested from the menu") }
                 if elapsed >= policy.hardAfterSeconds + postponed { reasons.append("\(Duration.text(elapsed)) on battery") }
-                if usable, let pct = judged.chargePercent, pct <= policy.hardAtPercent { reasons.append("charge at \(pct) %") }
-                if usable, let rt = judged.runtimeSeconds, rt <= policy.hardAtRuntimeSeconds { reasons.append("runtime down to \(Duration.text(TimeInterval(rt)))") }
+                if usable, let limit = policy.hardAtPercent, let pct = judged.chargePercent, pct <= limit { reasons.append("charge at \(pct) %") }
+                if usable, let limit = policy.hardAtRuntimeSeconds, let rt = judged.runtimeSeconds, rt <= limit { reasons.append("runtime down to \(Duration.text(TimeInterval(rt)))") }
                 if usable, judged.flags.contains(.shutdownImminent) { reasons.append("the UPS says shutdown is imminent") }
                 hardReasons = reasons
                 if !reasons.isEmpty {
@@ -253,6 +258,13 @@ public final class OutageGuard {
                             if canUnmount(v, now: now) {
                                 let others = otherHolders(v)
                                 env.log("no app holds \(v.name)\(others.isEmpty ? "" : " (ignoring \(others.map(\.shortName).joined(separator: ", ")))"): unmounting")
+                                unmount(v)
+                            }
+                        } else if quitting, let timeout = policy.quitTimeoutSeconds, quitDeadline(for: apps, timeout: timeout) <= now {
+                            if canUnmount(v, now: now) {
+                                let names = apps.map(\.shortName).sorted().joined(separator: ", ")
+                                env.log("\(names) did not quit within \(Duration.text(timeout)) of being asked: unmounting \(v.name) anyway")
+                                env.notify(title: "Unmounting \(v.name)", body: "\(names) did not quit within \(Duration.text(timeout)). Unmounting anyway.")
                                 unmount(v)
                             }
                         } else {
@@ -412,6 +424,12 @@ public final class OutageGuard {
         (holders[v.uuid]?.list ?? []).filter { !$0.isApp || policy.isNeverQuit($0) }
     }
 
+    /// When a volume held by `apps` is forced under the quit timeout: `timeout` after the
+    /// last of them was asked. An app not asked yet (it just appeared) has no deadline.
+    private func quitDeadline(for apps: [Holder], timeout: TimeInterval) -> TimeInterval {
+        apps.map { asked[$0.appKey].map { $0 + timeout } ?? .infinity }.max() ?? .infinity
+    }
+
     /// Not in flight, not within the backoff after a failure, and not just unmounted (the
     /// registry may report it mounted for a moment longer than the completion).
     private func canUnmount(_ v: VolumeState, now: TimeInterval) -> Bool {
@@ -488,6 +506,10 @@ public final class OutageGuard {
             if phase != .safe { s.untilHard = max(0, policy.hardAfterSeconds + postponed - elapsed) }
             if standingDown, let since = lineSince { s.untilStandDown = max(0, policy.lineStableSeconds - (now - since)) }
             s.upsAbsentFor = absentFor
+            if phase == .soft, policy.quitApps, !noQuitThisOutage, let timeout = policy.quitTimeoutSeconds {
+                let deadlines = volumes.filter(\.isMounted).map { appHolders($0) }.filter { !$0.isEmpty }.map { quitDeadline(for: $0, timeout: timeout) }
+                if let next = deadlines.min(), next.isFinite { s.untilQuitTimeout = max(0, next - now) }
+            }
         }
         s.volumes = volumes.map { v in
             VolumeReport(volume: v,
@@ -546,5 +568,47 @@ public enum Duration {
         let s = max(0, Int(seconds.rounded()))
         if s >= 600 { return "\(s / 60) min" }
         return String(format: "%d:%02d", s / 60, s % 60)
+    }
+
+    /// The reverse of `text`, for the settings fields: "90", "90 s", "2 min", "1.5 min",
+    /// "1 h 30 min", "1h30m", "2:30" (minutes:seconds). A bare number is seconds. Nil when
+    /// anything in the string is not a duration.
+    public static func parse(_ text: String) -> TimeInterval? {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !t.isEmpty else { return nil }
+        if t.contains(":") {
+            let parts = t.split(separator: ":", omittingEmptySubsequences: false).map { Double($0.trimmingCharacters(in: .whitespaces)) }
+            guard parts.count == 2, let m = parts[0], let s = parts[1], m >= 0, s >= 0, s < 60 else { return nil }
+            return m * 60 + s
+        }
+        var total: TimeInterval = 0
+        var number = ""
+        var unit = ""
+        func flush() -> Bool {
+            guard !number.isEmpty, let n = Double(number), n >= 0 else { return false }
+            switch unit {
+            case "", "s", "sec", "secs", "second", "seconds": total += n
+            case "m", "min", "mins", "minute", "minutes": total += n * 60
+            case "h", "hr", "hrs", "hour", "hours": total += n * 3600
+            default: return false
+            }
+            number = ""; unit = ""
+            return true
+        }
+        for c in t {
+            if c.isNumber || c == "." {
+                if !unit.isEmpty { guard flush() else { return nil } }
+                number.append(c)
+            } else if c.isLetter {
+                guard !number.isEmpty else { return nil }
+                unit.append(c)
+            } else if c == " " {
+                continue
+            } else {
+                return nil
+            }
+        }
+        guard flush() else { return nil }
+        return total
     }
 }

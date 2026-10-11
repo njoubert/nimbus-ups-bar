@@ -4,7 +4,7 @@ import Foundation
 
 /// What the owner approved: how long a blip may last before anything happens, when the
 /// volumes come off regardless, whether apps are asked to quit, and what to do once the
-/// drives are safe. Every number here is a judgement the owner can change in the menu.
+/// drives are safe. Every number here is a judgement the owner can change in Settings.
 public struct Policy: Equatable, Sendable {
     /// On battery this long, nothing is touched beyond a notification: a flicker must not
     /// disturb anything. After it, apps are asked to quit and volumes unmount as they free up.
@@ -12,10 +12,11 @@ public struct Policy: Equatable, Sendable {
     /// On battery this long, every protected volume is unmounted whether or not an app still
     /// holds it. The soft stage between `graceSeconds` and this is the apps' chance to close.
     public var hardAfterSeconds: TimeInterval
-    /// …or as soon as the UPS reports this charge or less.
-    public var hardAtPercent: Int
-    /// …or as soon as the UPS's runtime estimate is this short.
-    public var hardAtRuntimeSeconds: Int
+    /// …or as soon as the UPS reports this charge or less. Nil: the charge never forces anything
+    /// (this UPS's gauge follows the battery voltage and sags 20–30 points in the first minute).
+    public var hardAtPercent: Int?
+    /// …or as soon as the UPS's runtime estimate is this short. Nil: the estimate never forces.
+    public var hardAtRuntimeSeconds: Int?
     /// Charge and runtime are ignored this long after the transfer: some UPSes report 0 % or
     /// a nonsense runtime for the first seconds on battery.
     public var ignoreReadingsSeconds: TimeInterval
@@ -27,6 +28,10 @@ public struct Policy: Equatable, Sendable {
     /// Quit from their menu; an app with unsaved work shows its own dialog). Off means apps
     /// are never asked and the volumes wait for the hard limit.
     public var quitApps: Bool
+    /// An app asked to quit that still holds its volume this long later has the volume
+    /// force-unmounted anyway, before any hard limit. Nil: a stubborn app keeps its volume
+    /// mounted until a hard limit (the verified behaviour; the default).
+    public var quitTimeoutSeconds: TimeInterval?
     /// Apps never sent a quit and never waited for, by bundle id or name. Finder is always in it.
     public var neverQuit: Set<String>
     /// Once every protected volume is unmounted.
@@ -44,9 +49,9 @@ public struct Policy: Equatable, Sendable {
         }
     }
 
-    public init(graceSeconds: TimeInterval = 120, hardAfterSeconds: TimeInterval = 300, hardAtPercent: Int = 50,
-                hardAtRuntimeSeconds: Int = 600, ignoreReadingsSeconds: TimeInterval = 15, lineStableSeconds: TimeInterval = 30,
-                quitApps: Bool = true, neverQuit: Set<String> = [], afterSafe: AfterSafe = .keepRunning) {
+    public init(graceSeconds: TimeInterval = 120, hardAfterSeconds: TimeInterval = 300, hardAtPercent: Int? = 50,
+                hardAtRuntimeSeconds: Int? = 600, ignoreReadingsSeconds: TimeInterval = 15, lineStableSeconds: TimeInterval = 30,
+                quitApps: Bool = true, quitTimeoutSeconds: TimeInterval? = nil, neverQuit: Set<String> = [], afterSafe: AfterSafe = .keepRunning) {
         self.graceSeconds = graceSeconds
         self.hardAfterSeconds = hardAfterSeconds
         self.hardAtPercent = hardAtPercent
@@ -54,6 +59,7 @@ public struct Policy: Equatable, Sendable {
         self.ignoreReadingsSeconds = ignoreReadingsSeconds
         self.lineStableSeconds = lineStableSeconds
         self.quitApps = quitApps
+        self.quitTimeoutSeconds = quitTimeoutSeconds
         self.neverQuit = neverQuit.union(Policy.alwaysKept)
         self.afterSafe = afterSafe
     }
@@ -70,10 +76,23 @@ public struct Policy: Equatable, Sendable {
         var p = self
         p.graceSeconds = max(0, p.graceSeconds)
         p.hardAfterSeconds = max(p.graceSeconds, p.hardAfterSeconds)
-        p.hardAtPercent = min(100, max(0, p.hardAtPercent))
-        p.hardAtRuntimeSeconds = max(0, p.hardAtRuntimeSeconds)
+        p.hardAtPercent = p.hardAtPercent.map { min(100, max(0, $0)) }
+        p.hardAtRuntimeSeconds = p.hardAtRuntimeSeconds.map { max(0, $0) }
         p.ignoreReadingsSeconds = max(0, p.ignoreReadingsSeconds)
         p.lineStableSeconds = max(0, p.lineStableSeconds)
+        p.quitTimeoutSeconds = p.quitTimeoutSeconds.map { max(0, $0) }
         return p
+    }
+
+    /// The policy in one line, as the log and `--print` write it.
+    public var summary: String {
+        var limits = ["\(Duration.text(hardAfterSeconds)) on battery"]
+        if let pct = hardAtPercent { limits.append("\(pct) % charge") }
+        if let rt = hardAtRuntimeSeconds { limits.append("\(Duration.text(TimeInterval(rt))) runtime") }
+        let soft = quitApps
+            ? "ask apps to quit" + (quitTimeoutSeconds.map { ", force after \(Duration.text($0))" } ?? "")
+            : "never quit apps"
+        return "grace \(Duration.text(graceSeconds)), \(soft), hard at \(limits.joined(separator: " or ")), "
+            + "readings ignored for \(Duration.text(ignoreReadingsSeconds)), then \(afterSafe.title.lowercased())"
     }
 }

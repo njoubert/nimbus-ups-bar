@@ -1,0 +1,861 @@
+// Copyright (C) 2026 Niels Joubert
+// SPDX-License-Identifier: GPL-3.0-or-later
+import AppKit
+import NimbusUpdater
+import UpsGuardCore
+
+/// The Settings window: four panes behind toolbar tabs (Outage, Volumes, Readings, General),
+/// every control bound to `Settings` and applied the moment it changes, the way System
+/// Settings works. Opened from the menu's Settings… row and ⌘,. One window per app; closing
+/// it keeps it for next time.
+@MainActor
+final class SettingsWindowController: NSWindowController {
+    let tabs: SettingsTabs
+
+    init(monitor: UPSMonitor, updater: Updater?) {
+        tabs = SettingsTabs(monitor: monitor, updater: updater)
+        let window = NSWindow(contentViewController: tabs)
+        window.styleMask = [.titled, .closable, .miniaturizable]
+        window.toolbarStyle = .preference
+        window.isReleasedWhenClosed = false
+        super.init(window: window)
+        // The window took its size from the tab view's placeholder, not from the first pane.
+        if let first = tabs.tabViewItems.first?.viewController { window.setContentSize(first.preferredContentSize) }
+    }
+
+    required init?(coder: NSCoder) { fatalError("not from a nib") }
+
+    func show(_ pane: SettingsTabs.Pane? = nil) {
+        if let pane { tabs.selectedTabViewItemIndex = pane.rawValue }
+        if window?.isVisible != true { window?.center() }
+        // A menu bar app is never the active app; the window would open behind everything.
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+    }
+}
+
+@MainActor
+final class SettingsTabs: NSTabViewController {
+    enum Pane: Int, CaseIterable {
+        case outage, volumes, readings, general
+        var label: String { ["Outage", "Volumes", "Readings", "General"][rawValue] }
+        var symbol: String { ["bolt.fill", "externaldrive", "waveform.path.ecg", "gearshape"][rawValue] }
+    }
+    init(monitor: UPSMonitor, updater: Updater?) {
+        super.init(nibName: nil, bundle: nil)
+        tabStyle = .toolbar
+        transitionOptions = []
+        let panes: [SettingsPane] = [OutagePane(), VolumesPane(monitor: monitor), ReadingsPane(), GeneralPane(updater: updater)]
+        for (p, pane) in zip(Pane.allCases, panes) {
+            // The window's title follows the selected pane's title (an untitled pane shows "Untitled").
+            pane.title = p.label
+            let item = NSTabViewItem(viewController: pane)
+            item.label = p.label
+            item.image = NSImage(systemSymbolName: p.symbol, accessibilityDescription: p.label)
+            addTabViewItem(item)
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError("not from a nib") }
+}
+
+// MARK: - Panes
+
+/// A pane is a two-column form (labels right, controls left) that rebuilds its controls from
+/// `Settings` on `reload()`, which also runs whenever any setting changes anywhere.
+@MainActor
+class SettingsPane: NSViewController, NSTextFieldDelegate {
+    static let width: CGFloat = 580
+    let form = Form()
+    var reloading = false
+    private var observer: NSObjectProtocol?
+
+    override func loadView() {
+        let v = NSView()
+        build()
+        form.finish()
+        v.addSubview(form.grid)
+        NSLayoutConstraint.activate([
+            form.grid.topAnchor.constraint(equalTo: v.topAnchor, constant: 20),
+            form.grid.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 20),
+            form.grid.trailingAnchor.constraint(lessThanOrEqualTo: v.trailingAnchor, constant: -20),
+            form.grid.bottomAnchor.constraint(equalTo: v.bottomAnchor, constant: -20),
+            v.widthAnchor.constraint(equalToConstant: SettingsPane.width),
+        ])
+        view = v
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        reload()
+        observer = NotificationCenter.default.addObserver(forName: Settings.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reload() }
+        }
+        view.layoutSubtreeIfNeeded()
+        preferredContentSize = view.fittingSize
+    }
+
+    /// Add the rows. Called once, before the first `reload()`.
+    func build() {}
+    /// Set every control from `Settings`. Wrapped so control actions fired by the setting of a
+    /// value are ignored.
+    func reload() {}
+
+    func withoutActions(_ body: () -> Void) {
+        reloading = true
+        body()
+        reloading = false
+    }
+
+    // A field whose text is not a duration (or not a number): keep the focus there and say why.
+    func control(_ control: NSControl, didFailToFormatString string: String, errorDescription error: String?) -> Bool {
+        form.status.stringValue = error ?? "Not a valid value."
+        return false
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        form.status.stringValue = ""
+    }
+}
+
+/// The grid behind every pane.
+@MainActor
+final class Form {
+    let grid = NSGridView(numberOfColumns: 2, rows: 0)
+    let status = NSTextField(wrappingLabelWithString: "")
+    nonisolated static let labelWidth: CGFloat = 190
+    nonisolated static let controlWidth: CGFloat = 330
+
+    init() {
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        grid.rowSpacing = 6
+        grid.columnSpacing = 10
+        grid.rowAlignment = .firstBaseline
+        grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 0).width = Form.labelWidth
+        status.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        status.textColor = .systemRed
+        status.preferredMaxLayoutWidth = Form.controlWidth
+    }
+
+    /// One row: a right-aligned label, the control, and under it an optional explanation.
+    @discardableResult
+    func row(_ label: String, _ control: NSView, hint: String? = nil) -> NSGridRow {
+        let l = NSTextField(labelWithString: label)
+        l.alignment = .right
+        l.lineBreakMode = .byWordWrapping
+        l.maximumNumberOfLines = 2
+        l.preferredMaxLayoutWidth = Form.labelWidth
+        return grid.addRow(with: [l, hint.map { Form.stack(control, Form.hint($0)) } ?? control])
+    }
+
+    /// A small heading across both columns.
+    func section(_ title: String) {
+        let t = NSTextField(labelWithString: title.uppercased())
+        t.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        t.textColor = .secondaryLabelColor
+        let r = grid.addRow(with: [t])
+        r.mergeCells(in: NSRange(location: 0, length: 2))
+        r.topPadding = grid.numberOfRows > 1 ? 10 : 0
+        r.cell(at: 0).xPlacement = .leading
+    }
+
+    /// Text across both columns.
+    func note(_ text: String) {
+        let r = grid.addRow(with: [Form.hint(text, width: Form.labelWidth + Form.controlWidth + grid.columnSpacing)])
+        r.mergeCells(in: NSRange(location: 0, length: 2))
+        r.cell(at: 0).xPlacement = .leading
+    }
+
+    /// The error line at the bottom, plus a trailing control (Restore Defaults) if given.
+    func finish(trailing: NSView? = nil) {
+        let r = grid.addRow(with: [status, trailing ?? NSGridCell.emptyContentView])
+        r.topPadding = 8
+        r.cell(at: 0).xPlacement = .leading
+        if trailing != nil { r.cell(at: 1).xPlacement = .trailing }
+    }
+
+    static func hint(_ text: String, width: CGFloat = controlWidth) -> NSTextField {
+        let t = NSTextField(wrappingLabelWithString: text)
+        t.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        t.textColor = .secondaryLabelColor
+        t.preferredMaxLayoutWidth = width
+        t.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        t.widthAnchor.constraint(lessThanOrEqualToConstant: width).isActive = true
+        return t
+    }
+
+    static func stack(_ views: NSView...) -> NSStackView {
+        let s = NSStackView(views: views)
+        s.orientation = .vertical
+        s.alignment = .leading
+        s.spacing = 4
+        return s
+    }
+
+    static func line(_ views: NSView...) -> NSStackView {
+        let s = NSStackView(views: views)
+        s.orientation = .horizontal
+        s.alignment = .firstBaseline
+        s.spacing = 6
+        return s
+    }
+
+    static func label(_ text: String) -> NSTextField { NSTextField(labelWithString: text) }
+}
+
+/// The controls, made the same way everywhere.
+@MainActor
+enum Controls {
+    static func duration(_ target: SettingsPane, _ action: Selector, width: CGFloat = 96) -> NSTextField {
+        let f = NSTextField(string: "")
+        f.formatter = DurationFormatter()
+        f.target = target
+        f.action = action
+        f.delegate = target
+        f.widthAnchor.constraint(equalToConstant: width).isActive = true
+        f.toolTip = "A duration: 90 s, 2 min, 1.5 min, 1 h 30 min. A bare number is seconds."
+        return f
+    }
+
+    static func integer(_ target: SettingsPane, _ action: Selector, range: ClosedRange<Int>, width: CGFloat = 56) -> NSTextField {
+        let f = NSTextField(string: "")
+        let nf = NumberFormatter()
+        nf.minimum = range.lowerBound as NSNumber
+        nf.maximum = range.upperBound as NSNumber
+        nf.allowsFloats = false
+        nf.maximumFractionDigits = 0
+        f.formatter = nf
+        f.target = target
+        f.action = action
+        f.delegate = target
+        f.alignment = .right
+        f.widthAnchor.constraint(equalToConstant: width).isActive = true
+        return f
+    }
+
+    static func checkbox(_ title: String, _ target: AnyObject, _ action: Selector) -> NSButton {
+        NSButton(checkboxWithTitle: title, target: target, action: action)
+    }
+
+    static func radio(_ title: String, _ target: AnyObject, _ action: Selector) -> NSButton {
+        NSButton(radioButtonWithTitle: title, target: target, action: action)
+    }
+
+    static func button(_ title: String, _ target: AnyObject, _ action: Selector) -> NSButton {
+        let b = NSButton(title: title, target: target, action: action)
+        b.bezelStyle = .rounded
+        return b
+    }
+
+    static func popup(_ target: AnyObject, _ action: Selector) -> NSPopUpButton {
+        let p = NSPopUpButton(frame: .zero, pullsDown: false)
+        p.target = target
+        p.action = action
+        return p
+    }
+
+    static func table(_ owner: NSTableViewDataSource & NSTableViewDelegate, columns: [(String, CGFloat)], height: CGFloat) -> (NSScrollView, NSTableView) {
+        let table = NSTableView()
+        for (id, w) in columns {
+            let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+            c.width = w
+            c.minWidth = w
+            table.addTableColumn(c)
+        }
+        table.headerView = nil
+        table.rowHeight = 22
+        table.style = .inset
+        table.allowsEmptySelection = true
+        table.dataSource = owner
+        table.delegate = owner
+        let scroll = NSScrollView()
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        scroll.drawsBackground = true
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            scroll.widthAnchor.constraint(equalToConstant: Form.controlWidth),
+            scroll.heightAnchor.constraint(equalToConstant: height),
+        ])
+        return (scroll, table)
+    }
+
+    static func cell(_ table: NSTableView, id: String, editable: Bool, target: AnyObject? = nil, action: Selector? = nil) -> NSTableCellView {
+        let ident = NSUserInterfaceItemIdentifier(id)
+        if let v = table.makeView(withIdentifier: ident, owner: nil) as? NSTableCellView { return v }
+        let v = NSTableCellView()
+        v.identifier = ident
+        let t = NSTextField(labelWithString: "")
+        t.isEditable = editable
+        t.isSelectable = editable
+        t.isBordered = false
+        t.drawsBackground = false
+        t.lineBreakMode = .byTruncatingTail
+        t.translatesAutoresizingMaskIntoConstraints = false
+        if let target, let action { t.target = target; t.action = action }
+        v.addSubview(t)
+        v.textField = t
+        NSLayoutConstraint.activate([
+            t.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 2),
+            t.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -2),
+            t.centerYAnchor.constraint(equalTo: v.centerYAnchor),
+        ])
+        return v
+    }
+
+    static func value(_ f: NSTextField) -> Double? { (f.objectValue as? NSNumber)?.doubleValue }
+}
+
+/// "2 min" in, 120 out, and back. Rejects anything `Duration.parse` does not understand, which
+/// keeps the focus in the field with the reason underneath.
+final class DurationFormatter: Formatter {
+    override func string(for obj: Any?) -> String? {
+        guard let n = obj as? NSNumber else { return nil }
+        return Duration.text(n.doubleValue)
+    }
+
+    override func getObjectValue(_ obj: AutoreleasingUnsafeMutablePointer<AnyObject?>?, for string: String,
+                                 errorDescription: AutoreleasingUnsafeMutablePointer<NSString?>?) -> Bool {
+        guard let v = Duration.parse(string) else {
+            errorDescription?.pointee = "“\(string)” is not a duration. Write 90 s, 2 min, 1.5 min or 1 h 30 min." as NSString
+            return false
+        }
+        obj?.pointee = NSNumber(value: v)
+        return true
+    }
+}
+
+// MARK: Outage
+
+/// The policy: the grace, the soft stage and its timeout, the three hard limits (the time one
+/// is always on; it is the backstop), the readings blackout, the after-safe action, and the
+/// never-quit list.
+@MainActor
+final class OutagePane: SettingsPane, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
+    private var grace: NSTextField!
+    private var quitApps: NSButton!
+    private var quitTimeoutOn: NSButton!
+    private var quitTimeout: NSTextField!
+    private var hardAfter: NSTextField!
+    private var hardAtPercentOn: NSButton!
+    private var hardAtPercent: NSTextField!
+    private var hardAtRuntimeOn: NSButton!
+    private var hardAtRuntime: NSTextField!
+    private var ignoreReadings: NSTextField!
+    private var lineStable: NSTextField!
+    private var afterSafe: NSPopUpButton!
+    private var neverQuitTable: NSTableView!
+    private var addApp: NSPopUpButton!
+    private var removeApp: NSButton!
+    private var entries: [String] = []
+
+    override func build() {
+        form.section("Stages")
+        grace = Controls.duration(self, #selector(apply))
+        form.row("Wait before acting:", grace,
+                 hint: "On battery this long, nothing happens beyond a notification; a flicker disturbs nothing.")
+
+        quitApps = Controls.checkbox("Ask the apps holding files to quit", self, #selector(apply))
+        form.row("Then:", quitApps,
+                 hint: "Each gets the same quit event as its Quit menu, once per outage. A volume unmounts as soon as no app holds it.")
+        quitTimeoutOn = Controls.checkbox("", self, #selector(apply))
+        quitTimeoutOn.toolTip = "Off: an app that will not quit keeps its volume mounted until a hard limit."
+        quitTimeout = Controls.duration(self, #selector(apply), width: 80)
+        form.row("Give them at most:", Form.line(quitTimeoutOn, quitTimeout),
+                 hint: "Counted from the ask; then their volume is unmounted anyway. Off: a stubborn app keeps its volume until a hard limit.")
+
+        hardAfter = Controls.duration(self, #selector(apply))
+        form.row("Unmount regardless after:", hardAfter,
+                 hint: "Every protected volume is force-unmounted, open apps or not. Always on: this is the backstop.")
+        hardAtPercentOn = Controls.checkbox("", self, #selector(apply))
+        hardAtPercentOn.toolTip = "Off: the charge gauge never forces an unmount."
+        hardAtPercent = Controls.integer(self, #selector(apply), range: 0...100)
+        form.row("…or when the charge is at or below:", Form.line(hardAtPercentOn, hardAtPercent, Form.label("%")),
+                 hint: "The UPS's gauge follows the battery voltage: it sags 20–30 points in the first minute under load, then flattens.")
+        hardAtRuntimeOn = Controls.checkbox("", self, #selector(apply))
+        hardAtRuntimeOn.toolTip = "Off: the runtime estimate never forces an unmount."
+        hardAtRuntime = Controls.duration(self, #selector(apply), width: 80)
+        form.row("…or when the runtime estimate is at or below:", Form.line(hardAtRuntimeOn, hardAtRuntime),
+                 hint: "The UPS's own estimate at the current load; it tracks the load and is the better guide.")
+
+        ignoreReadings = Controls.duration(self, #selector(apply))
+        form.row("Ignore readings for the first:", ignoreReadings,
+                 hint: "Charge and runtime are not trusted this long after the transfer; some UPSes report 0 % for a moment.")
+        lineStable = Controls.duration(self, #selector(apply))
+        form.row("Power must stay back for:", lineStable,
+                 hint: "Before the outage counts as over. Under a brownout that transfers every few seconds, the clock and the limits keep running.")
+
+        form.section("Afterwards")
+        afterSafe = Controls.popup(self, #selector(apply))
+        for a in Policy.AfterSafe.allCases {
+            afterSafe.addItem(withTitle: a.title)
+            afterSafe.lastItem?.representedObject = a.rawValue
+        }
+        form.row("Once every volume is safe:", afterSafe,
+                 hint: "Never before the wait is over, so a blip cannot sleep the Mac. Test Shut down once at the keyboard.")
+
+        form.section("Never quit")
+        let (scroll, table) = Controls.table(self, columns: [("app", Form.controlWidth - 20)], height: 56)
+        neverQuitTable = table
+        addApp = NSPopUpButton(frame: .zero, pullsDown: true)
+        addApp.target = self
+        addApp.action = #selector(addEntry(_:))
+        addApp.menu?.delegate = self
+        addApp.addItem(withTitle: "Add App")
+        addApp.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        removeApp = Controls.button("Remove", self, #selector(removeEntry))
+        removeApp.isEnabled = false
+        form.row("Apps left alone:", Form.stack(scroll, Form.line(addApp, removeApp)),
+                 hint: "Besides Finder. Never asked to quit, never waited for: a volume they hold unmounts only at a hard limit. Bundle id or name.")
+    }
+
+    override func loadView() {
+        super.loadView()
+        // The form's bottom row: the error line and Restore Defaults.
+        form.grid.removeRow(at: form.grid.numberOfRows - 1)
+        form.finish(trailing: Controls.button("Restore Defaults", self, #selector(restore)))
+    }
+
+    override func reload() {
+        let s = Settings.shared
+        let p = s.policy
+        withoutActions {
+            grace.objectValue = p.graceSeconds
+            quitApps.state = p.quitApps ? .on : .off
+            quitTimeoutOn.state = p.quitTimeoutSeconds != nil ? .on : .off
+            quitTimeout.objectValue = p.quitTimeoutSeconds ?? s.quitTimeoutValue
+            quitTimeoutOn.isEnabled = p.quitApps
+            quitTimeout.isEnabled = p.quitApps && p.quitTimeoutSeconds != nil
+            hardAfter.objectValue = p.hardAfterSeconds
+            hardAtPercentOn.state = p.hardAtPercent != nil ? .on : .off
+            hardAtPercent.objectValue = p.hardAtPercent ?? s.hardAtPercentValue
+            hardAtPercent.isEnabled = p.hardAtPercent != nil
+            hardAtRuntimeOn.state = p.hardAtRuntimeSeconds != nil ? .on : .off
+            hardAtRuntime.objectValue = Double(p.hardAtRuntimeSeconds ?? s.hardAtRuntimeValue)
+            hardAtRuntime.isEnabled = p.hardAtRuntimeSeconds != nil
+            ignoreReadings.objectValue = p.ignoreReadingsSeconds
+            lineStable.objectValue = p.lineStableSeconds
+            afterSafe.selectItem(at: Policy.AfterSafe.allCases.firstIndex(of: p.afterSafe) ?? 0)
+            entries = p.neverQuit.subtracting(Policy.alwaysKept).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+            neverQuitTable.reloadData()
+            removeApp.isEnabled = neverQuitTable.selectedRow >= 0
+        }
+    }
+
+    @objc private func apply() {
+        guard !reloading else { return }
+        var p = Settings.shared.policy
+        p.graceSeconds = Controls.value(grace) ?? p.graceSeconds
+        p.quitApps = quitApps.state == .on
+        p.quitTimeoutSeconds = quitTimeoutOn.state == .on ? (Controls.value(quitTimeout) ?? Settings.shared.quitTimeoutValue) : nil
+        p.hardAfterSeconds = Controls.value(hardAfter) ?? p.hardAfterSeconds
+        p.hardAtPercent = hardAtPercentOn.state == .on ? Int(Controls.value(hardAtPercent) ?? Double(Settings.shared.hardAtPercentValue)) : nil
+        p.hardAtRuntimeSeconds = hardAtRuntimeOn.state == .on ? Int(Controls.value(hardAtRuntime) ?? Double(Settings.shared.hardAtRuntimeValue)) : nil
+        p.ignoreReadingsSeconds = Controls.value(ignoreReadings) ?? p.ignoreReadingsSeconds
+        p.lineStableSeconds = Controls.value(lineStable) ?? p.lineStableSeconds
+        if let raw = afterSafe.selectedItem?.representedObject as? String, let a = Policy.AfterSafe(rawValue: raw) { p.afterSafe = a }
+        p.neverQuit = Set(entries.filter { !$0.isEmpty })
+        Settings.shared.policy = p
+        if Settings.shared.policy.hardAfterSeconds != Controls.value(hardAfter) {
+            form.status.stringValue = "The time limit cannot come before the wait ends; it was moved to \(Duration.text(Settings.shared.policy.hardAfterSeconds))."
+        }
+    }
+
+    @objc private func restore() {
+        Settings.shared.resetPolicy()
+        form.status.stringValue = ""
+    }
+
+    // The never-quit table.
+
+    func numberOfRows(in tableView: NSTableView) -> Int { entries.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let cell = Controls.cell(tableView, id: "app", editable: true, target: self, action: #selector(entryEdited(_:)))
+        cell.textField?.stringValue = entries[row]
+        cell.textField?.placeholderString = "Bundle id or app name"
+        cell.textField?.tag = row
+        return cell
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        removeApp.isEnabled = neverQuitTable.selectedRow >= 0
+    }
+
+    @objc private func entryEdited(_ sender: NSTextField) {
+        let row = sender.tag
+        guard row < entries.count else { return }
+        entries[row] = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        apply()
+    }
+
+    /// The pull-down lists the apps running now; the last item adds a blank row to type into.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === addApp.menu else { return }
+        while menu.items.count > 1 { menu.removeItem(at: 1) }
+        let have = Set(entries.map { $0.lowercased() }).union(Policy.alwaysKept)
+        let apps = NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular && $0.bundleIdentifier != Bundle.main.bundleIdentifier }
+            .compactMap { a -> (String, String)? in
+                guard let id = a.bundleIdentifier, !have.contains(id.lowercased()), !have.contains((a.localizedName ?? "").lowercased()) else { return nil }
+                return (a.localizedName ?? id, id)
+            }
+            .sorted { $0.0.localizedCaseInsensitiveCompare($1.0) == .orderedAscending }
+        for (name, id) in apps {
+            let it = NSMenuItem(title: name, action: nil, keyEquivalent: "")
+            it.representedObject = id
+            it.toolTip = id
+            menu.addItem(it)
+        }
+        if !apps.isEmpty { menu.addItem(.separator()) }
+        let other = NSMenuItem(title: "Type a Name or Bundle ID…", action: nil, keyEquivalent: "")
+        other.representedObject = ""
+        menu.addItem(other)
+    }
+
+    @objc private func addEntry(_ sender: NSPopUpButton) {
+        guard let id = sender.selectedItem?.representedObject as? String else { return }
+        entries.append(id)
+        neverQuitTable.reloadData()
+        let row = entries.count - 1
+        neverQuitTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        if id.isEmpty {
+            neverQuitTable.editColumn(0, row: row, with: nil, select: true)
+        } else {
+            apply()
+        }
+    }
+
+    @objc private func removeEntry() {
+        let row = neverQuitTable.selectedRow
+        guard row >= 0, row < entries.count else { return }
+        entries.remove(at: row)
+        apply()
+        neverQuitTable.reloadData()
+    }
+}
+
+// MARK: Volumes
+
+/// Which volumes the guard protects: every external one, or a checked subset. Volumes seen
+/// before but not attached now stay in the list so they can be checked ahead of time.
+@MainActor
+final class VolumesPane: SettingsPane, NSTableViewDataSource, NSTableViewDelegate {
+    private let monitor: UPSMonitor
+    private var all: NSButton!
+    private var selected: NSButton!
+    private var table: NSTableView!
+    private var forget: NSButton!
+    private var rows: [VolumeState] = []
+    private var observers: [NSObjectProtocol] = []
+
+    init(monitor: UPSMonitor) {
+        self.monitor = monitor
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not from a nib") }
+
+    override func build() {
+        form.section("Protect")
+        all = Controls.radio("All external volumes", self, #selector(modeChanged(_:)))
+        selected = Controls.radio("Only the volumes checked below", self, #selector(modeChanged(_:)))
+        form.row("Volumes:", Form.stack(all, selected),
+                 hint: "Right for a desk where everything external hangs off the UPS. Disk images and the EFI and boot helper partitions never count as external.")
+        let (scroll, t) = Controls.table(self, columns: [("check", 24), ("name", 130), ("detail", Form.controlWidth - 24 - 130 - 24)], height: 150)
+        table = t
+        forget = Controls.button("Forget Volumes That Are Not Attached", self, #selector(forgetDetached))
+        form.row("", Form.stack(scroll, forget),
+                 hint: "Volumes are tracked by their UUID, so a drive keeps its setting when it comes back as a different disk number.")
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        let ws = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification, NSWorkspace.didRenameVolumeNotification] {
+            observers.append(ws.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.reload() }
+            })
+        }
+    }
+
+    override func viewWillAppear() {
+        super.viewWillAppear()
+        reload()
+    }
+
+    override func reload() {
+        let s = Settings.shared
+        withoutActions {
+            all.state = s.volumeMode == .allExternal ? .on : .off
+            selected.state = s.volumeMode == .selected ? .on : .off
+            var known = monitor.volumes.volumes
+            for v in s.knownVolumes where known[v.uuid] == nil { known[v.uuid] = v }
+            rows = known.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            table.reloadData()
+            forget.isEnabled = rows.contains { !$0.isAttached }
+        }
+    }
+
+    @objc private func modeChanged(_ sender: NSButton) {
+        guard !reloading else { return }
+        Settings.shared.volumeMode = sender === all ? .allExternal : .selected
+    }
+
+    @objc private func toggled(_ sender: NSButton) {
+        guard !reloading, sender.tag < rows.count else { return }
+        var set = Settings.shared.selectedVolumeUUIDs
+        let uuid = rows[sender.tag].uuid
+        if sender.state == .on { set.insert(uuid) } else { set.remove(uuid) }
+        Settings.shared.selectedVolumeUUIDs = set
+    }
+
+    @objc private func forgetDetached() {
+        for v in rows where !v.isAttached { Settings.shared.forget(v.uuid) }
+        reload()
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let v = rows[row]
+        let s = Settings.shared
+        switch tableColumn?.identifier.rawValue {
+        case "check":
+            let ident = NSUserInterfaceItemIdentifier("check")
+            let box = (tableView.makeView(withIdentifier: ident, owner: nil) as? NSButton) ?? {
+                let b = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggled(_:)))
+                b.identifier = ident
+                return b
+            }()
+            box.tag = row
+            box.state = s.selectedVolumeUUIDs.contains(v.uuid) ? .on : .off
+            box.isEnabled = s.volumeMode == .selected
+            box.toolTip = v.uuid
+            return box
+        case "name":
+            let cell = Controls.cell(tableView, id: "name", editable: false)
+            cell.textField?.stringValue = v.name
+            cell.textField?.textColor = v.isAttached ? .labelColor : .secondaryLabelColor
+            cell.toolTip = v.uuid
+            return cell
+        default:
+            let cell = Controls.cell(tableView, id: "detail", editable: false)
+            var detail = v.detail
+            if !v.isAttached { detail = "not attached" + (detail.isEmpty ? "" : " · " + detail) }
+            else if !v.isMounted { detail = "not mounted" + (detail.isEmpty ? "" : " · " + detail) }
+            cell.textField?.stringValue = detail
+            cell.textField?.textColor = .secondaryLabelColor
+            cell.textField?.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            cell.toolTip = v.uuid
+            return cell
+        }
+    }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { false }
+}
+
+// MARK: Readings
+
+/// How often the UPS is read, how much history the chart keeps, and the menu bar's extra.
+@MainActor
+final class ReadingsPane: SettingsPane {
+    private var line: NSTextField!
+    private var busy: NSTextField!
+    private var history: NSPopUpButton!
+    private var showLoad: NSButton!
+
+    override func build() {
+        form.section("Reading the UPS")
+        line = Controls.duration(self, #selector(apply))
+        form.row("On line power, read every:", line,
+                 hint: "Charge, load, voltages and the UPS's own limits, over USB; a read takes about 30 ms. 2 s to 10 min.")
+        busy = Controls.duration(self, #selector(apply))
+        form.row("On battery, read every:", busy,
+                 hint: "Also during a simulation and while the menu is open. The outage guard ticks on this clock, so its countdowns move in these steps. 1 s to 1 min, never slower than on line power.")
+        form.note("The line/battery state does not wait for a read: macOS posts an event the instant the UPS transfers, and the guard acts on it. "
+                  + "A read that stays unanswered for three intervals (at least a minute) is a health warning.")
+
+        form.section("Chart")
+        history = Controls.popup(self, #selector(apply))
+        form.row("Show the last:", history,
+                 hint: "Samples are kept in memory for this long at the read interval; the chart's time axis follows.")
+
+        form.section("Menu bar")
+        showLoad = Controls.checkbox("Show the load in watts next to the icon", self, #selector(apply))
+        form.row("", showLoad)
+    }
+
+    override func loadView() {
+        super.loadView()
+        form.grid.removeRow(at: form.grid.numberOfRows - 1)
+        form.finish(trailing: Controls.button("Restore Defaults", self, #selector(restore)))
+    }
+
+    override func reload() {
+        let s = Settings.shared
+        withoutActions {
+            line.objectValue = s.lineReadInterval
+            busy.objectValue = s.busyReadInterval
+            history.removeAllItems()
+            for h in (Settings.historyChoices + [s.historyWindow]).uniqued().sorted() {
+                history.addItem(withTitle: Duration.text(h))
+                history.lastItem?.representedObject = h
+                if h == s.historyWindow { history.select(history.lastItem) }
+            }
+            showLoad.state = s.showLoadInBar ? .on : .off
+        }
+    }
+
+    @objc private func apply() {
+        guard !reloading else { return }
+        let s = Settings.shared
+        if let v = Controls.value(line), v != s.lineReadInterval { s.lineReadInterval = v }
+        if let v = Controls.value(busy), v != s.busyReadInterval { s.busyReadInterval = v }
+        if let h = history.selectedItem?.representedObject as? TimeInterval, h != s.historyWindow { s.historyWindow = h }
+        if (showLoad.state == .on) != s.showLoadInBar { s.showLoadInBar = showLoad.state == .on }
+        var notes: [String] = []
+        if let v = Controls.value(line), v != s.lineReadInterval { notes.append("line-power interval kept between 2 s and 10 min") }
+        if let v = Controls.value(busy), v != s.busyReadInterval { notes.append("battery interval kept between 1 s and the line-power interval") }
+        form.status.stringValue = notes.joined(separator: "; ").capitalizingFirst
+        reload()
+    }
+
+    @objc private func restore() {
+        Settings.shared.resetReadings()
+        form.status.stringValue = ""
+    }
+}
+
+// MARK: General
+
+/// Persistence, notifications, updates, the Postpone amount, and the log.
+@MainActor
+final class GeneralPane: SettingsPane {
+    private let updater: Updater?
+    private var agent: NSButton!
+    private var agentHint: NSTextField!
+    private var notifications: NSButton!
+    private var autoUpdate: NSButton?
+    private var postpone: NSTextField!
+
+    init(updater: Updater?) {
+        self.updater = updater
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not from a nib") }
+
+    override func build() {
+        form.section("Running")
+        agent = Controls.checkbox("Run in the background at login", self, #selector(toggleAgent))
+        agentHint = Form.hint("")
+        form.grid.addRow(with: [Form.label("Persistence:"), Form.stack(agent, agentHint)])
+        form.grid.cell(atColumnIndex: 0, rowIndex: form.grid.numberOfRows - 1).xPlacement = .trailing
+        notifications = Controls.checkbox("Show notifications", self, #selector(apply))
+        form.row("Notifications:", notifications,
+                 hint: "At the transfer, when apps are asked to quit, at each unmount, and when power returns.")
+        if updater != nil {
+            let b = Controls.checkbox("Check for updates automatically", self, #selector(apply))
+            autoUpdate = b
+            form.row("Updates:", b,
+                     hint: "Once a day against GitHub releases (api.github.com). Off, the app talks to nothing at all.")
+        }
+
+        form.section("Outage menu")
+        postpone = Controls.duration(self, #selector(apply))
+        form.row("Postpone adds:", postpone,
+                 hint: "The outage menu's Postpone pushes the soft stage and the time limit out by this much. The charge and runtime limits still apply. 1 min to 1 h.")
+
+        form.section("Log")
+        let open = Controls.button("Open Log File", self, #selector(openLog))
+        form.row("", Form.stack(open, Form.hint("Every reading, decision and action, timestamped, in ~/Library/Logs/Nimbus UPS Bar/ups-bar.log. Also in the unified log under com.njoubert.nimbusupsbar.")))
+        form.note(StatusBarController.versionString())
+    }
+
+    override func reload() {
+        let s = Settings.shared
+        withoutActions {
+            agent.state = BackgroundAgent.isEnabled ? .on : .off
+            agent.isEnabled = BackgroundAgent.isAvailable
+            if !BackgroundAgent.isAvailable {
+                agentHint.stringValue = "This binary has no agent plist (a bare swift build). Use ./build.sh run or install."
+            } else if BackgroundAgent.status == .requiresApproval {
+                agentHint.stringValue = "Waiting for approval in System Settings › General › Login Items."
+            } else if !Bundle.main.bundlePath.hasPrefix("/Applications/") {
+                agentHint.stringValue = "This copy runs from \(Bundle.main.bundlePath). Registering points launchd at that path; ./build.sh install is the real thing."
+            } else {
+                agentHint.stringValue = "A launchd agent starts the app at login and restarts it if it crashes. Quit stays quit."
+            }
+            notifications.state = s.notificationsEnabled ? .on : .off
+            if let u = updater { autoUpdate?.state = u.automaticChecks ? .on : .off }
+            postpone.objectValue = s.postponeSeconds
+        }
+    }
+
+    @objc private func apply() {
+        guard !reloading else { return }
+        let s = Settings.shared
+        if (notifications.state == .on) != s.notificationsEnabled {
+            s.notificationsEnabled = notifications.state == .on
+            if s.notificationsEnabled { Notifications.shared.requestAuthorizationIfNeeded() }
+        }
+        if let u = updater, let b = autoUpdate, (b.state == .on) != u.automaticChecks { u.automaticChecks = b.state == .on }
+        if let v = Controls.value(postpone), v != s.postponeSeconds { s.postponeSeconds = v }
+        reload()
+    }
+
+    @objc private func toggleAgent() {
+        guard !reloading else { return }
+        UserDefaults.standard.set(true, forKey: BackgroundAgent.registeredDefaultsKey)
+        AppDelegate.shared?.setAgent(enabled: agent.state == .on)
+        reload()
+    }
+
+    @objc private func openLog() { NSWorkspace.shared.open(Log.fileURL) }
+}
+
+// MARK: - Main menu
+
+/// A menu bar app shows no menu bar of its own, but the key equivalents still come from
+/// `NSApp.mainMenu`: without an Edit menu, ⌘C and ⌘V do nothing in the settings fields and
+/// ⌘W does not close the window.
+@MainActor
+enum MainMenu {
+    static func install() {
+        let main = NSMenu()
+        let appItem = NSMenuItem()
+        let app = NSMenu()
+        app.addItem(withTitle: "Settings…", action: #selector(AppDelegate.showSettings), keyEquivalent: ",")
+        app.addItem(.separator())
+        app.addItem(withTitle: "Quit Nimbus UPS Bar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = app
+        main.addItem(appItem)
+
+        let editItem = NSMenuItem()
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = edit
+        main.addItem(editItem)
+
+        let windowItem = NSMenuItem()
+        let window = NSMenu(title: "Window")
+        window.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        window.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowItem.submenu = window
+        main.addItem(windowItem)
+        NSApp.mainMenu = main
+    }
+}
+
+private extension String {
+    var capitalizingFirst: String { isEmpty ? self : prefix(1).uppercased() + dropFirst() }
+}

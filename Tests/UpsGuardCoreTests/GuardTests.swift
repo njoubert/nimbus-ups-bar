@@ -674,6 +674,92 @@ final class GuardTests: XCTestCase {
         XCTAssertFalse(r3.onBattery)
     }
 
+    func testChargeLimitOffIgnoresTheGauge() {
+        guardian.policy = Policy(hardAtPercent: nil)
+        env.add(flitslig, holders: [lightroom])
+        guardian.tick(ac())
+        onBattery(until: 60, battery(20))
+        XCTAssertEqual(guardian.status.phase, .holding, "20 % is not a reason when the charge limit is off")
+        XCTAssertTrue(env.unmounts.isEmpty)
+        onBattery(until: 300, battery(20))
+        XCTAssertEqual(env.unmounts, ["Flitslig"], "the time limit is always on")
+    }
+
+    func testRuntimeLimitOffIgnoresTheEstimate() {
+        guardian.policy = Policy(hardAtRuntimeSeconds: nil)
+        env.add(flitslig)
+        guardian.tick(ac())
+        onBattery(until: 60, battery(90, runtime: 60))
+        XCTAssertEqual(guardian.status.phase, .holding)
+        XCTAssertTrue(env.unmounts.isEmpty)
+    }
+
+    func testQuitTimeoutForcesAStubbornAppBeforeTheHardLimit() {
+        guardian.policy = Policy(quitTimeoutSeconds: 60)
+        env.add(flitslig, holders: [lightroom, smbd])
+        guardian.tick(ac())
+        onBattery(until: 120)                         // asked at the end of the grace
+        XCTAssertEqual(env.quits, [lightroom.appKey])
+        XCTAssertEqual(guardian.status.untilQuitTimeout, 60)
+        XCTAssertEqual(guardian.status.untilForce, 60, "the quit timeout comes before the 180 s to the hard limit")
+        onBattery(until: 175)
+        XCTAssertTrue(env.unmounts.isEmpty)
+        XCTAssertEqual(guardian.status.phase, .soft)
+        onBattery(until: 180)                         // 60 s after the ask
+        XCTAssertEqual(env.unmounts, ["Flitslig"])
+        XCTAssertEqual(guardian.status.phase, .safe)
+        XCTAssertEqual(env.quits.count, 1)
+        XCTAssertTrue(env.lines.contains { $0.contains("did not quit within 1 min") })
+        XCTAssertFalse(env.lines.contains { $0.hasPrefix("hard limit") }, "this is the soft stage giving up, not a hard limit")
+    }
+
+    func testQuitTimeoutWaitsForEveryAppOnTheVolume() {
+        guardian.policy = Policy(quitTimeoutSeconds: 60)
+        let photos = Holder(pid: 101, executable: "/System/Applications/Photos.app/Contents/MacOS/Photos", appName: "Photos", bundleID: "com.apple.Photos")
+        env.add(flitslig, holders: [lightroom])
+        guardian.tick(ac())
+        onBattery(until: 120)
+        env.holderLists[flitslig.uuid] = [lightroom, photos]   // Photos opens a file; asked on the next tick, at 125 s
+        onBattery(until: 150)
+        XCTAssertEqual(env.quits, [lightroom.appKey, photos.appKey])
+        XCTAssertEqual(guardian.status.untilQuitTimeout, 35, "the volume is forced a minute after the last ask")
+        onBattery(until: 180)
+        XCTAssertTrue(env.unmounts.isEmpty, "Lightroom's minute is up, Photos' is not")
+        onBattery(until: 185)
+        XCTAssertEqual(env.unmounts, ["Flitslig"])
+    }
+
+    func testQuitTimeoutIsMootWhenAppsAreNotAsked() {
+        guardian.policy = Policy(quitApps: false, quitTimeoutSeconds: 60)
+        env.add(flitslig, holders: [lightroom])
+        guardian.tick(ac())
+        onBattery(until: 200)
+        XCTAssertTrue(env.quits.isEmpty)
+        XCTAssertTrue(env.unmounts.isEmpty, "nobody was asked, so nobody can have failed to quit")
+        XCTAssertNil(guardian.status.untilQuitTimeout)
+        onBattery(until: 300)
+        XCTAssertEqual(env.unmounts, ["Flitslig"])
+    }
+
+    func testDurationParse() {
+        XCTAssertEqual(Duration.parse("90"), 90)
+        XCTAssertEqual(Duration.parse("90 s"), 90)
+        XCTAssertEqual(Duration.parse("2 min"), 120)
+        XCTAssertEqual(Duration.parse("1.5 min"), 90)
+        XCTAssertEqual(Duration.parse("2m"), 120)
+        XCTAssertEqual(Duration.parse("1 h 30 min"), 5400)
+        XCTAssertEqual(Duration.parse("1h30m"), 5400)
+        XCTAssertEqual(Duration.parse("2 min 05 s"), 125)
+        XCTAssertEqual(Duration.parse("2:30"), 150)
+        XCTAssertEqual(Duration.parse(" 10 MIN "), 600)
+        XCTAssertNil(Duration.parse(""))
+        XCTAssertNil(Duration.parse("soon"))
+        XCTAssertNil(Duration.parse("5 parsecs"))
+        XCTAssertNil(Duration.parse("-5 s"))
+        XCTAssertNil(Duration.parse("2:75"))
+        for v: TimeInterval in [45, 120, 125, 5400, 3600] { XCTAssertEqual(Duration.parse(Duration.text(v)), v, "text round-trips") }
+    }
+
     func testDurationText() {
         XCTAssertEqual(Duration.text(45), "45 s")
         XCTAssertEqual(Duration.text(120), "2 min")
@@ -689,5 +775,11 @@ final class GuardTests: XCTestCase {
         XCTAssertEqual(p.hardAfterSeconds, 600, "the hard limit can never come before the grace period ends")
         XCTAssertEqual(p.hardAtPercent, 100)
         XCTAssertTrue(p.neverQuit.contains("com.apple.finder"))
+        let off = Policy(hardAtPercent: nil, hardAtRuntimeSeconds: nil, quitTimeoutSeconds: -5).normalized
+        XCTAssertNil(off.hardAtPercent)
+        XCTAssertNil(off.hardAtRuntimeSeconds)
+        XCTAssertEqual(off.quitTimeoutSeconds, 0)
+        XCTAssertEqual(Policy().summary, "grace 2 min, ask apps to quit, hard at 5 min on battery or 50 % charge or 10 min runtime, readings ignored for 15 s, then keep running")
+        XCTAssertEqual(off.summary, "grace 2 min, ask apps to quit, force after 0 s, hard at 5 min on battery, readings ignored for 15 s, then keep running")
     }
 }
