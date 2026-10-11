@@ -311,9 +311,6 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         let sim = NSMenuItem(title: "Simulate an Outage", action: nil, keyEquivalent: "")
         sim.submenu = simulationMenu()
         menu.addItem(sim)
-        let events = NSMenuItem(title: "Recent Events", action: nil, keyEquivalent: "")
-        events.submenu = eventsMenu()
-        menu.addItem(events)
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
         settings.toolTip = "Policy: " + monitor.policyText
@@ -523,29 +520,6 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         return m
     }
 
-    private func eventsMenu() -> NSMenu {
-        let m = NSMenu()
-        let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
-        let recent = Log.shared.recent.suffix(18)
-        if recent.isEmpty { m.addItem(disabled("Nothing yet")) }
-        for e in recent {
-            var line = e.line
-            if line.count > 96 { line = String(line.prefix(93)) + "…" }
-            let it = NSMenuItem(title: "", action: #selector(copyValue(_:)), keyEquivalent: "")
-            it.target = self
-            it.representedObject = e.line
-            it.toolTip = e.line
-            let t = NSMutableAttributedString(string: f.string(from: e.date) + "  ", attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular), .foregroundColor: NSColor.secondaryLabelColor])
-            t.append(NSAttributedString(string: line, attributes: [.font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize)]))
-            it.attributedTitle = t
-            m.addItem(it)
-        }
-        m.addItem(.separator())
-        m.addItem(action("Open Log File", #selector(openLog)))
-        return m
-    }
-
     // MARK: Updates (the same rows as the sibling apps)
 
     private func addUpdateItems() {
@@ -669,7 +643,6 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     @objc private func openSettings() { AppDelegate.shared?.showSettings() }
     @objc private func openInspector() { AppDelegate.shared?.showInspector() }
-    @objc private func openLog() { NSWorkspace.shared.open(Log.fileURL) }
 
     @objc private func toggleAgent(_ sender: NSMenuItem) {
         let turnOn = !BackgroundAgent.isEnabled

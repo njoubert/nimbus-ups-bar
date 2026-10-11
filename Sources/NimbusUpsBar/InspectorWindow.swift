@@ -119,7 +119,8 @@ final class InspectorSidebar: NSViewController, NSTableViewDataSource, NSTableVi
     func reload() {
         var e = model.sections.map { (id: $0.id, title: $0.title, symbol: $0.symbol, badge: nil as String?) }
         e.append((id: "changes", title: "Changes", symbol: "arrow.triangle.2.circlepath", badge: model.changes.isEmpty ? nil : "\(min(model.changes.count, 999))"))
-        e.append((id: "log", title: "Events", symbol: "list.bullet.rectangle", badge: nil))
+        e.append((id: "events", title: "Events", symbol: "list.bullet.rectangle", badge: nil))
+        e.append((id: "log", title: "Log File", symbol: "doc.plaintext", badge: nil))
         let selected = table.selectedRow >= 0 && table.selectedRow < entries.count ? entries[table.selectedRow].id : nil
         let structural = e.map(\.id) != entries.map(\.id)
         entries = e
@@ -182,9 +183,20 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
     private let text = NSTextView()
     private let textScroll = NSScrollView()
     private var copied: NSButton!
+    /// A section's own actions: Show Progress under Events, Clear under Changes, Open Log File
+    /// and Show in Finder under Log File.
+    private var extra: NSButton!
+    private var extra2: NSButton!
+    private var showProgress = false
+    /// The Log File view: the file's tail, followed as it grows.
+    private let logText = NSTextView()
+    private let logScroll = NSScrollView()
+    private var logOffset: UInt64 = 0
+    private var logPathShown = ""
+    static let logTail: UInt64 = 2_000_000
 
     /// What the table shows: a group heading or a row (with the flash key).
-    private enum Line { case group(String); case row(Inspector.Row, flashKey: String?) }
+    private enum Line { case group(String); case row(Inspector.Row, flashKey: String?); case event(LogEvent.Kind, Date, String) }
     private var lines: [Line] = []
 
     var showingJSON: Bool { mode.selectedSegment == 1 }
@@ -234,12 +246,27 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
         textScroll.documentView = text
         textScroll.hasVerticalScroller = true
         textScroll.isHidden = true
+        logText.isEditable = false
+        logText.isSelectable = true
+        logText.usesFindBar = true
+        logText.isIncrementalSearchingEnabled = true
+        logText.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        logText.textContainerInset = NSSize(width: 10, height: 10)
+        logText.isVerticallyResizable = true
+        logText.autoresizingMask = [.width]
+        logScroll.documentView = logText
+        logScroll.hasVerticalScroller = true
+        logScroll.isHidden = true
 
         let titles = NSStackView(views: [titleLabel, subtitle])
         titles.orientation = .vertical
         titles.alignment = .leading
         titles.spacing = 2
-        let buttons = NSStackView(views: [mode, copied, copyAll])
+        extra = NSButton(title: "", target: self, action: #selector(extraAction))
+        extra.isHidden = true
+        extra2 = NSButton(title: "Show in Finder", target: self, action: #selector(revealLog))
+        extra2.isHidden = true
+        let buttons = NSStackView(views: [extra, extra2, mode, copied, copyAll])
         buttons.spacing = 8
         let header = NSStackView(views: [titles, buttons])
         header.distribution = .fill
@@ -247,7 +274,7 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
         titles.setContentHuggingPriority(.defaultLow, for: .horizontal)
         titles.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         buttons.setContentHuggingPriority(.required, for: .horizontal)
-        for x in [header, tableScroll, textScroll] as [NSView] { x.translatesAutoresizingMaskIntoConstraints = false; v.addSubview(x) }
+        for x in [header, tableScroll, textScroll, logScroll] as [NSView] { x.translatesAutoresizingMaskIntoConstraints = false; v.addSubview(x) }
         NSLayoutConstraint.activate([
             header.topAnchor.constraint(equalTo: v.safeAreaLayoutGuide.topAnchor, constant: 12),
             header.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 20),
@@ -260,6 +287,10 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
             textScroll.leadingAnchor.constraint(equalTo: v.leadingAnchor),
             textScroll.trailingAnchor.constraint(equalTo: v.trailingAnchor),
             textScroll.bottomAnchor.constraint(equalTo: v.bottomAnchor),
+            logScroll.topAnchor.constraint(equalTo: tableScroll.topAnchor),
+            logScroll.leadingAnchor.constraint(equalTo: v.leadingAnchor),
+            logScroll.trailingAnchor.constraint(equalTo: v.trailingAnchor),
+            logScroll.bottomAnchor.constraint(equalTo: v.bottomAnchor),
             v.widthAnchor.constraint(greaterThanOrEqualToConstant: 520),
         ])
         view = v
@@ -278,9 +309,29 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
     }
 
     @objc private func modeChanged() {
-        tableScroll.isHidden = showingJSON
-        textScroll.isHidden = !showingJSON
         reload(force: true)
+    }
+
+    private func layoutFor(_ id: String) {
+        let isLog = id == "log"
+        mode.isHidden = isLog
+        tableScroll.isHidden = isLog || showingJSON
+        textScroll.isHidden = isLog || !showingJSON
+        logScroll.isHidden = !isLog
+        extra.isHidden = !["events", "changes", "log"].contains(id)
+        extra2.isHidden = !isLog
+        switch id {
+        case "events": extra.title = showProgress ? "Hide Progress Lines" : "Show Progress Lines"; extra.toolTip = "The once-a-minute \"on battery …\" readings during an outage"
+        case "changes": extra.title = "Clear"; extra.toolTip = "Forget the changes seen so far"
+        default: extra.title = "Open Log File"; extra.toolTip = Log.fileURL.path
+        }
+        let titles: [String]
+        switch id {
+        case "events": titles = ["Time", "Event", "Kind"]
+        case "changes": titles = ["Time and field", "New value", "Old value"]
+        default: titles = ["Field", "Value", "Detail"]
+        }
+        for (c, t) in zip(table.tableColumns, titles) { c.title = t }
     }
 
     // MARK: Content
@@ -290,13 +341,14 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
     private func currentJSON() -> Any {
         switch current {
         case "changes": return model.changesJSON()
-        case "log": return model.logJSON()
+        case "events", "log": return model.logJSON()
         default: return section?.json ?? [:]
         }
     }
 
     func reload(force: Bool = false) {
         let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
+        layoutFor(current)
         switch current {
         case "changes":
             titleLabel.stringValue = "Changes"
@@ -304,10 +356,16 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
             lines = model.changes.map { c in
                 .row(Inspector.Row("\(f.string(from: c.at))  \(c.section) › \(c.key)", c.new ?? "(gone)", detail: c.old.map { "was \($0)" } ?? "(new)"), flashKey: nil)
             }
-        case "log":
+        case "events":
             titleLabel.stringValue = "Events"
-            subtitle.stringValue = "The guard's log, newest first · \(Log.fileURL.path)"
-            lines = Log.shared.recent.reversed().map { .row(Inspector.Row(f.string(from: $0.date), $0.line), flashKey: nil) }
+            let all = model.recentEvents().reversed().map { (LogEvent.kind(of: $0.1), $0) }
+            let shown = all.filter { showProgress || !$0.0.isRoutine }
+            subtitle.stringValue = "What the app decided and did, newest first, from the log file · \(shown.count) of its last \(all.count) lines"
+            lines = shown.map { .event($0.0, $0.1.0, $0.1.1) }
+        case "log":
+            titleLabel.stringValue = "Log File"
+            followLog(force: force)
+            return
         default:
             guard let s = section else { return }
             titleLabel.stringValue = s.title
@@ -335,8 +393,47 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
         }
     }
 
+    @objc private func extraAction() {
+        switch current {
+        case "log": NSWorkspace.shared.open(Log.fileURL)
+        case "events": showProgress.toggle(); reload(force: true)
+        default: model.clearChanges(); reload(force: true)
+        }
+    }
+
+    @objc private func revealLog() { NSWorkspace.shared.activateFileViewerSelecting([Log.fileURL]) }
+
     @objc private func copySection() {
-        put(Inspector.json(currentJSON()), on: copied, title: "Copy")
+        put(current == "log" ? logText.string : Inspector.json(currentJSON()), on: copied, title: "Copy")
+    }
+
+    /// The log file's last `logTail` bytes, then whatever is appended, keeping the view at the
+    /// bottom when it was there. A file that shrank (rotated, deleted) is read again from its tail.
+    private func followLog(force: Bool) {
+        let url = Log.fileURL
+        let size = ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.uint64Value ?? 0
+        let atBottom = logScroll.contentView.bounds.maxY >= (logText.frame.height - 20)
+        if force || size < logOffset || logPathShown != url.path {
+            logOffset = size > InspectorDetail.logTail ? size - InspectorDetail.logTail : 0
+            logText.string = ""
+            logPathShown = url.path
+        }
+        if size > logOffset, let h = try? FileHandle(forReadingFrom: url) {
+            try? h.seek(toOffset: logOffset)
+            let data = h.readDataToEndOfFile()
+            try? h.close()
+            logOffset += UInt64(data.count)
+            var chunk = String(decoding: data, as: UTF8.self)
+            if logText.string.isEmpty, logOffset > UInt64(data.count), let nl = chunk.firstIndex(of: "\n") {
+                chunk = String(chunk[chunk.index(after: nl)...])   // start on a whole line
+            }
+            logText.textStorage?.append(NSAttributedString(string: chunk, attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular), .foregroundColor: NSColor.labelColor]))
+            if force || atBottom { logText.scrollToEndOfDocument(nil) }
+        }
+        let mb = Double(size) / 1_000_000
+        subtitle.stringValue = "\(url.path) · \(String(format: mb < 0.1 ? "%.0f KB" : "%.1f MB", mb < 0.1 ? Double(size) / 1000 : mb))"
+            + (size > InspectorDetail.logTail ? " · showing the last 2 MB" : "") + " · ⌘F to search"
     }
 
     @objc private func copyAll(_ sender: NSButton) {
@@ -361,6 +458,33 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         switch lines[row] {
+        case .event(let kind, let date, let line):
+            let f = DateFormatter(); f.dateFormat = Calendar.current.isDateInToday(date) ? "HH:mm:ss" : "MMM d HH:mm:ss"
+            let id = tableColumn?.identifier.rawValue ?? "label"
+            let cell = NSTableCellView()
+            let t = NSTextField(labelWithString: id == "label" ? f.string(from: date) : id == "value" ? line : kind.title)
+            t.lineBreakMode = .byTruncatingTail
+            t.isSelectable = true
+            t.toolTip = line
+            t.translatesAutoresizingMaskIntoConstraints = false
+            if id == "label" { t.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular); t.textColor = .secondaryLabelColor }
+            if id == "detail" { t.textColor = .secondaryLabelColor; t.font = .systemFont(ofSize: NSFont.smallSystemFontSize) }
+            if kind == .problem || kind == .outage || kind == .stage { t.font = .systemFont(ofSize: NSFont.systemFontSize, weight: id == "value" ? .semibold : .regular) }
+            cell.addSubview(t)
+            var leading = t.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2)
+            if id == "label" {
+                let icon = NSImageView(image: NSImage(systemSymbolName: kind.symbol, accessibilityDescription: kind.title) ?? NSImage())
+                icon.contentTintColor = InspectorDetail.color(kind)
+                icon.translatesAutoresizingMaskIntoConstraints = false
+                cell.addSubview(icon)
+                NSLayoutConstraint.activate([icon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
+                                             icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                                             icon.widthAnchor.constraint(equalToConstant: 16)])
+                leading = t.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8)
+            }
+            NSLayoutConstraint.activate([leading, t.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -2),
+                                         t.centerYAnchor.constraint(equalTo: cell.centerYAnchor)])
+            return cell
         case .group(let g):
             let t = NSTextField(labelWithString: g.uppercased())
             t.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
@@ -403,6 +527,22 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
         let v = FlashRowView()
         if case .row(_, let key?) = lines[row], let at = model.changedAt[key], Date().timeIntervalSince(at) < 0.6 { v.flashOnce = true }
         return v
+    }
+}
+
+extension InspectorDetail {
+    /// Status colours for the kinds that are about the outage; the rest stay neutral.
+    static func color(_ k: LogEvent.Kind) -> NSColor {
+        switch k {
+        case .outage: return .systemOrange
+        case .stage: return .systemRed
+        case .problem: return .systemRed
+        case .power: return .systemGreen
+        case .volume: return .systemBlue
+        case .apps: return .systemPurple
+        case .ups: return .systemTeal
+        default: return .secondaryLabelColor
+        }
     }
 }
 

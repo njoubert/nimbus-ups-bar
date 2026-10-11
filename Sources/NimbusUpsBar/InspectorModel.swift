@@ -50,6 +50,26 @@ final class InspectorModel {
 
     func clearChanges() { changes = [] }
 
+    /// The log file's last lines, parsed: Events reads these rather than this process's ring,
+    /// so it reaches back across relaunches and includes the command-line runs. Re-read only
+    /// when the file has grown.
+    private var eventsCache: (size: UInt64, lines: [(Date, String)]) = (0, [])
+    func recentEvents(limit: Int = 1000) -> [(Date, String)] {
+        let url = Log.fileURL
+        let size = ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.uint64Value ?? 0
+        if size != eventsCache.size {
+            var text = ""
+            if let h = try? FileHandle(forReadingFrom: url) {
+                try? h.seek(toOffset: size > 400_000 ? size - 400_000 : 0)
+                text = String(decoding: h.readDataToEndOfFile(), as: UTF8.self)
+                try? h.close()
+            }
+            eventsCache = (size, Array(LogEvent.parse(text).suffix(limit)))
+        }
+        // Nothing on disk (the bare binary without persistence): this process's lines.
+        return eventsCache.lines.isEmpty ? Log.shared.recent.map { ($0.date, $0.line) } : eventsCache.lines
+    }
+
     // MARK: Sections
 
     private func build() -> [Inspector.Section] {
@@ -177,6 +197,6 @@ final class InspectorModel {
     }
 
     func logJSON(limit: Int = 500) -> [[String: Any]] {
-        Log.shared.recent.suffix(limit).map { ["at": Inspector.iso($0.date), "line": $0.line] }
+        recentEvents().suffix(limit).map { ["at": Inspector.iso($0.0), "line": $0.1, "kind": LogEvent.kind(of: $0.1).rawValue] }
     }
 }

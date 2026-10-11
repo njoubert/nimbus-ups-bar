@@ -144,7 +144,7 @@ enum CLI {
             spin(1.5)
             for (i, e) in wc.sidebar.entries.enumerated() {
                 for json in [false, true] {
-                    if json, e.id == "changes" || e.id == "log" { continue }
+                    if json, ["changes", "events", "log"].contains(e.id) { continue }
                     wc.sidebar.select(e.id)
                     wc.detail.selectMode(json: json)
                     spin(0.5)
