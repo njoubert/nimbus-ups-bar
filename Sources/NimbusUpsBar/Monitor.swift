@@ -64,6 +64,12 @@ final class UPSMonitor {
     private(set) var samples: [Sample] = []
     /// Set once any UPS has been seen this run, so "no UPS" can be told apart from "not yet read".
     private(set) var upsSeen = false
+    /// When the power sources were last read (every tick, plus on every change event).
+    private(set) var lastPollAt: TimeInterval?
+    /// While the menu is open the HID is read every tick, so what is on screen is seconds old.
+    var menuOpen = false {
+        didSet { if menuOpen, !oldValue { hidDue = 0; poll(reason: nil) } }
+    }
     var onChange: (() -> Void)?
 
     private var timer: Timer?
@@ -134,7 +140,8 @@ final class UPSMonitor {
         iops = snap.ups
         internalBattery = snap.internalBattery
         if snap.ups.present { upsSeen = true }
-        let busy = snap.ups.onBattery || simulation != nil
+        lastPollAt = now
+        let busy = snap.ups.onBattery || simulation != nil || menuOpen
         if now >= hidDue, !hidInFlight, hid.isAttached {
             hidDue = now + (busy ? UPSMonitor.tickInterval : UPSMonitor.sampleInterval)
             readHID(now: now)
@@ -324,6 +331,29 @@ final class UPSMonitor {
         PowerActions.holdAwake(false)
         live.tick(reading)
         onChange?()
+    }
+
+    // MARK: Freshness
+
+    struct Freshness {
+        /// Seconds since the figures on screen were read.
+        var age: TimeInterval
+        /// How often they are being read right now.
+        var interval: TimeInterval
+        /// "USB HID" when the detail read is working, "macOS" when only the power-source entry is.
+        var source: String
+    }
+
+    /// How old what the menu shows is, and the current cadence.
+    var freshness: Freshness? {
+        let now = monotonicNow()
+        let busy = reading.onBattery || simulation != nil || menuOpen
+        let interval = busy ? UPSMonitor.tickInterval : UPSMonitor.sampleInterval
+        if let at = hidReadAt, hid.isAttached, now - at < UPSMonitor.hidFreshFor * 4 {
+            return Freshness(age: now - at, interval: interval, source: "USB HID")
+        }
+        if let at = lastPollAt { return Freshness(age: now - at, interval: UPSMonitor.tickInterval, source: "macOS") }
+        return nil
     }
 
     // MARK: Health

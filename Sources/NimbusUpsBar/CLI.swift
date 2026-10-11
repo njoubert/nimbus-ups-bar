@@ -139,6 +139,7 @@ enum CLI {
     private static func printReport(_ m: UPSMonitor) {
         let r = m.reading
         Swift.print("UPS: \(summary(r))")
+        if let f = m.freshness { Swift.print("Read \(Duration.text(f.age)) ago over \(f.source); every \(Int(f.interval)) s") }
         if let b = m.internalBattery { Swift.print("Mac battery: \(b.percent) %\(b.isCharging ? ", charging" : "")\(b.onAC ? ", on AC" : ", discharging")") }
         Swift.print("")
         Swift.print("Health:")

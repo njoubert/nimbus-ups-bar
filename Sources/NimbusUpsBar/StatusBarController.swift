@@ -36,6 +36,8 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         menu.autoenablesItems = false
         item.menu = menu
         headline.model = { [weak self] in self?.headlineModel() ?? HeadlineView.Model(title: "", color: .clear, subtitle: "") }
+        headline.toolTip = "Charge, load and voltages come from a USB read of the UPS: every 10 s on line power, every 2 s on battery and while this menu is open. "
+            + "The line/battery state also arrives from macOS the moment it changes. The top-right figure is the age of what you see."
         chart.samples = { [weak self] in self?.monitor.samples ?? [] }
         monitor.onChange = { [weak self] in self?.monitorChanged() }
         Log.shared.onAppend = { [weak self] in self?.logChanged() }
@@ -203,7 +205,12 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             figures.append((r.loadWatts.map { "\(Int($0.rounded())) W" } ?? "—", "Load"))
             figures.append((r.runtimeSeconds.map { Duration.text(TimeInterval($0)) } ?? "—", r.onBattery ? "Left" : "Runtime"))
         }
-        return HeadlineView.Model(title: title, color: color, subtitle: subtitle, figures: figures)
+        var fresh = ""
+        if let f = monitor.freshness {
+            fresh = (f.age < 1.5 ? "read just now" : "read \(Duration.text(f.age)) ago") + " · every \(Int(f.interval)) s"
+            if f.source != "USB HID" { fresh += " · macOS only" }
+        }
+        return HeadlineView.Model(title: title, color: color, subtitle: subtitle, figures: figures, freshness: fresh)
     }
 
     // MARK: Menu lifecycle
@@ -213,7 +220,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         menuOpen = true
         updater?.checkIfStale()
-        monitor.poll(reason: nil)
+        monitor.menuOpen = true
         let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshLiveRows() }
         }
@@ -223,6 +230,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     func menuDidClose(_ menu: NSMenu) {
         menuOpen = false
+        monitor.menuOpen = false
         liveTimer?.invalidate()
         liveTimer = nil
         chart.clearHover()

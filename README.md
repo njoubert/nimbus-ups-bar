@@ -58,7 +58,9 @@ charge and runtime limits still apply: postponing cannot talk the battery into l
 UPSes report 0 % for a moment at the transfer.
 
 **In the dropdown.** First the headline: the stage, what comes next and when, and three figures:
-charge, load in watts, runtime (the UPS's own estimate at the current load). Then a chart of the
+charge, load in watts, runtime (the UPS's own estimate at the current load). Top right, how old
+those figures are and how often they are read: every 10 s on line power, every 2 s on battery and
+while the menu is open (the line/battery state itself arrives from macOS the moment it changes). Then a chart of the
 **last hour** in two panels on one time axis, load above and battery charge below, with minutes on
 battery tinted; hover for the values at any moment. Then:
 

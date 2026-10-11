@@ -12,9 +12,11 @@ final class HeadlineView: NSView {
         var color: NSColor
         var subtitle: String       // "CP1500PFCLCDa · 190 min at this load" or "Apps close in 1:52 · forced at 4:52"
         var figures: [(String, String)] = []   // (value, caption)
+        /// "read 3 s ago · every 10 s", top right. Empty when nothing has been read.
+        var freshness: String = ""
 
         static func == (a: Model, b: Model) -> Bool {
-            a.title == b.title && a.subtitle == b.subtitle && a.figures.map(\.0) == b.figures.map(\.0) && a.figures.map(\.1) == b.figures.map(\.1)
+            a.title == b.title && a.subtitle == b.subtitle && a.figures.map(\.0) == b.figures.map(\.0) && a.figures.map(\.1) == b.figures.map(\.1) && a.freshness == b.freshness
         }
     }
 
@@ -24,6 +26,7 @@ final class HeadlineView: NSView {
     private static let subtitleFont = NSFont.systemFont(ofSize: 11)
     private static let figureFont = NSFont.systemFont(ofSize: 20, weight: .medium)
     private static let captionFont = NSFont.systemFont(ofSize: 10.5, weight: .medium)
+    private static let freshnessFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
 
     var model: () -> Model = { Model(title: "", color: .labelColor, subtitle: "") }
 
