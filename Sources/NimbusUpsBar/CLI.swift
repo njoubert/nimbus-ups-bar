@@ -118,7 +118,7 @@ enum CLI {
             return 0
 
         case .inspectJSON:
-            // The Inspector's snapshot without a window: what Copy All would put on the clipboard.
+            // Every Inspector page in one JSON document, without a window: the whole snapshot for an agent.
             let m = UPSMonitor()
             m.inspectorOpen = true
             m.poll(reason: nil)

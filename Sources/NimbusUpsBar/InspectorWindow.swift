@@ -8,7 +8,7 @@ import UpsGuardCore
 /// The Inspector: everything the app knows, live. A sidebar of sections (the UPS over USB,
 /// macOS's entry, health, the guard, the volumes, the readings, the background agent, what
 /// changed, the log); each shows as a table whose changed rows flash, or as the JSON an agent
-/// can be handed, with a Copy button for either and Copy All for the whole snapshot. While it
+/// can be handed, with Copy Page for either (`--inspect-json` prints the whole snapshot). While it
 /// is on screen the UPS is read as often as on battery.
 @MainActor
 final class InspectorWindowController: NSWindowController, NSWindowDelegate {
@@ -169,7 +169,7 @@ final class InspectorSidebar: NSViewController, NSTableViewDataSource, NSTableVi
 
 // MARK: - Detail
 
-/// One section: a header (title, how fresh, Table/JSON, Copy, Copy All) over the table or the
+/// One section: a header (title, how fresh, Table/JSON, Copy Page) over the table or the
 /// JSON text.
 @MainActor
 final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
@@ -215,10 +215,8 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
         mode.selectedSegment = 0
         mode.target = self
         mode.action = #selector(modeChanged)
-        copied = NSButton(title: "Copy", target: self, action: #selector(copySection))
-        copied.toolTip = "Copy this section as JSON (in Table view too): the form to paste into an agent."
-        let copyAll = NSButton(title: "Copy All", target: self, action: #selector(copyAll))
-        copyAll.toolTip = "Copy every section, the recent changes and the log tail as one JSON document."
+        copied = NSButton(title: "Copy Page", target: self, action: #selector(copySection))
+        copied.toolTip = "Copy this page as JSON (in Table view too; the Log File as its text): the form to paste into an agent."
 
         for (id, title, width) in [("label", "Field", 250.0), ("value", "Value", 400.0), ("detail", "Detail", 260.0)] {
             let c = NSTableColumn(identifier: .init(id))
@@ -266,16 +264,15 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
         extra.isHidden = true
         extra2 = NSButton(title: "Show in Finder", target: self, action: #selector(revealLog))
         extra2.isHidden = true
-        let buttons = NSStackView(views: [extra, extra2, mode, copied, copyAll])
+        let buttons = NSStackView(views: [extra, extra2, mode, copied])
         buttons.spacing = 8
         // The buttons are pinned to the right edge, so they stay put in every section whatever
-        // the title and subtitle say; "Copied" does not resize its button either. A section's
+        // the title and subtitle say; "Copied" does not resize Copy Page either. A section's
         // own buttons (Show Progress, Open Log File…) grow leftwards from the segmented control.
         titles.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         subtitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         buttons.setContentHuggingPriority(.required, for: .horizontal)
-        copied.widthAnchor.constraint(equalToConstant: 76).isActive = true
-        copyAll.widthAnchor.constraint(equalToConstant: 84).isActive = true
+        copied.widthAnchor.constraint(equalToConstant: 96).isActive = true
         for x in [titles, buttons, tableScroll, textScroll, logScroll] as [NSView] { x.translatesAutoresizingMaskIntoConstraints = false; v.addSubview(x) }
         NSLayoutConstraint.activate([
             titles.topAnchor.constraint(equalTo: v.safeAreaLayoutGuide.topAnchor, constant: 12),
@@ -409,7 +406,7 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
     @objc private func revealLog() { NSWorkspace.shared.activateFileViewerSelecting([Log.fileURL]) }
 
     @objc private func copySection() {
-        put(current == "log" ? logText.string : Inspector.json(currentJSON()), on: copied, title: "Copy")
+        put(current == "log" ? logText.string : Inspector.json(currentJSON()), on: copied, title: "Copy Page")
     }
 
     /// The log file's last `logTail` bytes, then whatever is appended, keeping the view at the
@@ -442,9 +439,6 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
         subtitle.toolTip = subtitle.stringValue
     }
 
-    @objc private func copyAll(_ sender: NSButton) {
-        put(model.snapshotJSON(), on: sender, title: "Copy All")
-    }
 
     private func put(_ s: String, on button: NSButton, title: String) {
         NSPasteboard.general.clearContents()

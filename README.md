@@ -93,8 +93,8 @@ any moment. Then:
   holds them, how the readings are taken (cadence, read counts, failures, power-source events),
   and the background agent and this copy (SMAppService status, the launchd job's state, pid, runs
   and last exit code, the bundle, the version). Each section is a table whose rows flash when a
-  value changes, or the same as JSON; *Copy* puts the section's JSON on the clipboard and *Copy
-  All* the whole snapshot, the form to paste into an agent. *Changes* lists every value that moved
+  value changes, or the same as JSON; *Copy Page* puts the page's JSON on the clipboard, the form
+  to paste into an agent (`--inspect-json` prints every page at once). *Changes* lists every value that moved
   since the window opened, with the old and the new. *Events* is what the app decided and did,
   newest first, each line with an icon and a colour for its kind (outage, stage, apps, volumes,
   the UPS, problems, rehearsals; the once-a-minute progress lines on request). *Log File* is the
@@ -209,7 +209,7 @@ The command line has the same readers and the same guard with no UI:
 ```
 .build/debug/NimbusUpsBar --print          everything the menu would show, as text
 .build/debug/NimbusUpsBar --print-menu     the menu itself, built against the real UPS, as a tree
-.build/debug/NimbusUpsBar --inspect-json   the Inspector's snapshot as JSON (what Copy All copies)
+.build/debug/NimbusUpsBar --inspect-json   every Inspector page in one JSON document
 .build/debug/NimbusUpsBar --watch          readings and the guard's log as they happen
 .build/debug/NimbusUpsBar --simulate [drain|shortBattery|upsLostInOutage|upsLostOnLine]
                                            a rehearsal in the terminal
