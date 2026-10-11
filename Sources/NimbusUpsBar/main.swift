@@ -17,7 +17,7 @@ import UpsGuardCore
 //   --render-iconset DIR    write an .iconset (for iconutil) and exit
 //   --render-dmg-background DIR [--signed]   write the disk image's background PNGs and exit
 //   --dump-bar PATH         render just the status item to PATH, quit (layout check)
-//   --dump-chart PATH       render the chart with fake data to PATH, quit (layout check)
+//   --dump-chart PATH       render the chart with fake data to PATH (+ -hover, -light, -empty), quit
 //   --dump-settings DIR     render each pane of the Settings window to DIR/N-name.png, quit (layout check)
 //   --dump-hid-raw PATH     write every raw HID element value of the attached UPS as JSON (the decode fixture); "-" for stdout
 //
@@ -83,25 +83,39 @@ while !args.isEmpty {
     case "--dump-chart":
         let path = takeValue(a)
         MainActor.assumeIsolated {
-            NSApplication.shared.appearance = NSAppearance(named: .darkAqua)
-            let v = ChartView(frame: NSRect(x: 0, y: 0, width: 448, height: ChartView.chartHeight))
+            // A day shaped like 2026-10-10's: 80–105 W with steps as the display and drives
+            // wake, and a four-minute outage twenty minutes ago where the voltage-derived gauge
+            // loses 25 points in the first minute, flattens, and recharges slowly afterwards.
             let now = monotonicNow()
             var fake: [UPSMonitor.Sample] = []
             for i in 0..<360 {
                 let t = now - Double(360 - i) * 10
-                let outage = i >= 200 && i < 260
-                let load = 110 + 25 * sin(Double(i) / 9) + (i % 37 == 0 ? 60 : 0)
-                let charge = i < 200 ? 100 : outage ? max(40, 100 - (i - 200)) : min(100, 40 + (i - 260) * 2)
-                fake.append(UPSMonitor.Sample(t: t, date: Date(), loadWatts: load, charge: charge, onBattery: outage, inputVoltage: outage ? 0 : 122, runtimeSeconds: charge * 60, batteryVoltage: outage ? 24.6 : 27.1))
+                let outage = i >= 216 && i < 240
+                var load = 88 + 6 * sin(Double(i) / 7) + (i % 90 < 30 ? 14 : 0)
+                if i < 40 { load -= 20 }
+                let charge: Int
+                if i < 216 { charge = 100 } else if outage { charge = max(72, 100 - (i - 216) * 4) } else { charge = min(100, 72 + (i - 240) / 5) }
+                let runtime = outage ? 3300 - (i - 216) * 20 : 5700 - (100 - charge) * 40
+                fake.append(UPSMonitor.Sample(t: t, date: Date(), loadWatts: load, charge: charge, onBattery: outage,
+                                              inputVoltage: outage ? 0 : 122, runtimeSeconds: runtime, batteryVoltage: outage ? 25.4 : 27.1))
             }
-            v.samples = { fake }
-            v.now = { now }
-            v.simulateHover(atFraction: 0.62)
-            v.debugBackground = true
-            guard let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { exit(1) }
-            v.cacheDisplay(in: v.bounds, to: rep)
-            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
-            print("wrote \(path)")
+            let base = path.hasSuffix(".png") ? String(path.dropLast(4)) : path
+            for (suffix, appearance, hover, data) in [("", NSAppearance.Name.darkAqua, nil as CGFloat?, fake), ("-hover", .darkAqua, 0.63, fake),
+                                                      ("-light", .aqua, nil, fake), ("-empty", .darkAqua, nil, [])] {
+                NSApplication.shared.appearance = NSAppearance(named: appearance)
+                let v = ChartView(frame: NSRect(x: 0, y: 0, width: StatusBarController.chartWidth, height: ChartView.chartHeight))
+                v.appearance = NSAppearance(named: appearance)
+                v.samples = { data }
+                v.now = { now }
+                v.chargeLimit = Policy().hardAtPercent
+                v.simulateHover(atFraction: hover)
+                v.debugBackground = true
+                guard let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { exit(1) }
+                v.cacheDisplay(in: v.bounds, to: rep)
+                let out = base + suffix + ".png"
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: out))
+                print("wrote \(out)")
+            }
         }
         exit(0)
     case "--dump-settings": cli = .dumpSettings(dir: takeValue(a))

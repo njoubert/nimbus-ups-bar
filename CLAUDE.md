@@ -107,7 +107,8 @@ Sources/NimbusUpsBar/        the app
   PowerActions.swift         sleep assertion, IOPMSleepSystem, the loginwindow shutdown event
   StatusBarController.swift  the bar, the menu, every submenu, menuText() for --print-menu
   HeadlineView.swift         the phase + three figures at the top of the menu
-  ChartView.swift            load and charge, two panels, one hour, hover readout, outage bands
+  ChartView.swift            load and charge, two panels, time ticks, newest values in the headers,
+                             the charge limit, outage bands, hover readout
   AppIcon.swift, DMGBackground.swift, Updates.swift   as in the siblings
 Tests/UpsGuardCoreTests/     47 scenarios against FakeEnvironment
 Tests/NimbusUpsBarKitTests/  45 checks: the HID decode against Fixtures/cp1500pfclcda.json and
@@ -135,7 +136,7 @@ main.
 .build/debug/NimbusUpsBar --print-menu   the menu built against the real UPS, as an indented tree
 .build/debug/NimbusUpsBar --watch        readings + the guard's log as they happen (Ctrl-C)
 .build/debug/NimbusUpsBar --simulate     a rehearsal in the terminal (~30 s; touches nothing)
-.build/debug/NimbusUpsBar --dump-chart P the chart with fake data → PNG (dark appearance)
+.build/debug/NimbusUpsBar --dump-chart P the chart with fake data at menu width → P, P-hover, P-light, P-empty
 .build/debug/NimbusUpsBar --dump-settings D   each Settings pane → D/N-name.png, then the real window
                                          on screen for ~3 s → D/window-N-name.png (the layout check)
 .build/debug/NimbusUpsBar --dump-hid-raw P   every raw HID element value as JSON: the decode fixture
