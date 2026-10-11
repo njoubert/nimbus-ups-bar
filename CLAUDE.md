@@ -53,6 +53,11 @@ README before changing the policy or the stages.
   directly unless the owner explicitly says to commit straight to `main` for that change; an
   earlier instruction to do so does not carry over to the next change. Landing a PR (merge,
   delete the branch) is also the owner's call.
+- **Check that a push arrived before relying on it.** Compare `git rev-parse HEAD` with
+  `git ls-remote origin refs/heads/<branch>` after every push, and the PR's `headRefOid` with
+  the local commit before merging; never filter a push's output away. On 2026-10-11 three
+  commits of PR #8 never reached GitHub, the PR merged without them, and PR #9 had to restore
+  them.
 - **A PR that touches anything the owner sees gets a screenshot in its description**: the menu,
   the headline, the chart, the Settings window, notifications, the icon, the DMG. Show the
   state the change is about (hovered, empty, light and dark where it matters), before and after
