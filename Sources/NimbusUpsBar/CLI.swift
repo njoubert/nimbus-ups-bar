@@ -3,6 +3,7 @@
 import AppKit
 import Foundation
 import NimbusUpdater
+import Security
 import NimbusUpsBarKit
 import UpsGuardCore
 
@@ -77,10 +78,19 @@ enum CLI {
             spin(1.0)
             m.poll(reason: nil)
             // No window server (a CI runner, an SSH session): build the menu without a status
-            // item rather than abort in NSStatusBar. NIMBUS_UPS_HEADLESS=1 forces that path.
-            let headless = CGSessionCopyCurrentDictionary() == nil || ProcessInfo.processInfo.environment["NIMBUS_UPS_HEADLESS"] != nil
+            // item rather than abort in NSStatusBar. The session's graphics-access bit is the
+            // canonical test; NIMBUS_UPS_HEADLESS=1 forces that path, NIMBUS_UPS_TRACE=1 narrates.
+            var attrs = SessionAttributeBits()
+            SessionGetInfo(callerSecuritySession, nil, &attrs)
+            let env = ProcessInfo.processInfo.environment
+            let headless = !attrs.contains(.sessionHasGraphicAccess) || env["NIMBUS_UPS_HEADLESS"] != nil
+            let trace = env["NIMBUS_UPS_TRACE"] != nil
+            if trace { fputs("trace: session attrs 0x\(String(attrs.rawValue, radix: 16)), graphic access \(attrs.contains(.sessionHasGraphicAccess)), headless \(headless)\n", stderr) }
             let bar = StatusBarController(monitor: m, updater: nil, headless: headless)
-            Swift.print(bar.menuText())
+            if trace { fputs("trace: controller built\n", stderr) }
+            let text = bar.menuText()
+            if trace { fputs("trace: menu built, \(text.count) chars\n", stderr) }
+            Swift.print(text)
             return 0
 
         case .holders(let path):

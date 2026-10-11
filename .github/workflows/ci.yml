@@ -24,9 +24,12 @@ jobs:
         # Arbitration filter, the holder resolver, the IOKit+HID merge. No UPS needed.
         run: swift test
       - name: Smoke-run the command line with no UPS attached
-        # The runner has no UPS and no external disk; every command must still exit 0.
-        # --print-menu builds every submenu, so a crash in menu code is caught without a
-        # screen; --simulate walks the whole rehearsal with the pretend UPS (about 30 s).
+        # The runner has no UPS, no external disk and no window server; every command must
+        # still exit 0. --print-menu builds every submenu (headless: no status item), so a
+        # crash in menu code is caught without a screen; --simulate walks the whole rehearsal
+        # with the pretend UPS (about 30 s).
+        env:
+          NIMBUS_UPS_TRACE: 1
         run: |
           bin=.build/debug/NimbusUpsBar
           run() { perl -e 'alarm shift; exec @ARGV' 180 "$@"; }

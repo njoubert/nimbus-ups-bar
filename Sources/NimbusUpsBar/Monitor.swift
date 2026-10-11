@@ -188,9 +188,9 @@ final class UPSMonitor {
         hidSequence += 1
         let seq = hidSequence
         let hid = self.hid
-        hidQueue.async {
+        hidQueue.async { [weak self] in
             let report = hid.read(now: now)
-            DispatchQueue.main.async { [weak self] in
+            DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self, seq == self.hidSequence else { return }
                     self.hidStartedAt = nil

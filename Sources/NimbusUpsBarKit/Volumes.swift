@@ -21,8 +21,8 @@ public final class VolumeRegistry {
     public var onChange: (() -> Void)?
 
     private let session: DASession
-    private static let efi = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
-    private static let appleBoot = "426F6F74-0000-11AA-AA11-00306543ECAC"
+    private nonisolated static let efi = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
+    private nonisolated static let appleBoot = "426F6F74-0000-11AA-AA11-00306543ECAC"
 
     public init(remembered: [VolumeState]) {
         for v in remembered { volumes[v.uuid] = v }
