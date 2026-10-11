@@ -86,8 +86,21 @@ any moment. Then:
   Now* / *Mount*, its UUID, device, mount point, drive model, and the processes holding it.
 - **UPS Health**: the checks below, each with a dot, and *Run Battery Self-Test…*, the UPS's own
   ten-second quick test.
-- **UPS Details**: every field the UPS reports over USB HID, grouped by battery, input and output,
-  plus the entry macOS keeps for it (`pmset -g ps`) and the Mac's own battery. Click any row to copy.
+- **Inspector…** (⌘I): a window with everything the app knows, live. A sidebar of sections: every
+  field the UPS reports over USB HID (decoded, with each element's collection, page, usage and raw
+  value), the entry macOS keeps for it (`pmset -g ps`) and the Mac's own battery, the health
+  checks, the outage guard (phase, countdowns, the policy it runs), the protected volumes and who
+  holds them, how the readings are taken (cadence, read counts, failures, power-source events),
+  and the background agent and this copy (SMAppService status, the launchd job's state, pid, runs
+  and last exit code, the bundle, the version). Each section is a table whose rows flash when a
+  value changes, or the same as JSON; *Copy* puts the section's JSON on the clipboard and *Copy
+  All* the whole snapshot, the form to paste into an agent. *Changes* lists every value that moved
+  since the window opened, with the old and the new. *Events* is what the app decided and did,
+  newest first, each line with an icon and a colour for its kind (outage, stage, apps, volumes,
+  the UPS, problems, rehearsals; the once-a-minute progress lines on request). *Log File* is the
+  whole text log, `~/Library/Logs/Nimbus UPS Bar/ups-bar.log`, followed as it grows and searchable
+  with ⌘F, with *Open Log File* and *Show in Finder*. While the Inspector is on screen the UPS is
+  read as often as on battery.
 - **Simulate an Outage**: a **rehearsal** (a pretend outage at 10× speed against the real volumes
   and the real apps holding them, under the current policy; it logs what it would do and touches
   nothing), in four scenarios: the battery draining, a short battery (so the runtime and charge
@@ -95,9 +108,6 @@ any moment. Then:
   and a **drill** (the
   same pretend outage at 5× with real quits, real unmounts and real remounts; it never sleeps or
   shuts down the Mac, and a real outage abandons it).
-- **Recent Events** and *Open Log File*: every decision, reading and action, timestamped, in
-  `~/Library/Logs/Nimbus UPS Bar/ups-bar.log` (also in the unified log under
-  `com.njoubert.nimbusupsbar`).
 - **Settings…** (⌘,): the window described next.
 - **Run in Background at Login**, the update items, the version, Quit.
 
@@ -190,7 +200,7 @@ hosts it ever talks to.
   every 2 s on battery; both from Settings), keeps the chart's samples, and runs simulations.
 - `swift test` runs 76 outage scenarios against a fake desk (flapping mains, a UPS that drops off
   USB for a moment or for good, a relaunch mid-outage, a volume that refuses to unmount, two volumes
-  landing at different times, each stage on each condition, every rehearsal scenario end to end, …) and 47 checks of the platform layer against fixtures, among them a raw
+  landing at different times, each stage on each condition, every rehearsal scenario end to end, …) and 57 checks of the platform layer against fixtures, among them a raw
   dump of the CP1500's 58 HID elements, so the decode, the health rules and the volume filter are
   checked in CI with no hardware attached.
 
@@ -199,6 +209,7 @@ The command line has the same readers and the same guard with no UI:
 ```
 .build/debug/NimbusUpsBar --print          everything the menu would show, as text
 .build/debug/NimbusUpsBar --print-menu     the menu itself, built against the real UPS, as a tree
+.build/debug/NimbusUpsBar --inspect-json   the Inspector's snapshot as JSON (what Copy All copies)
 .build/debug/NimbusUpsBar --watch          readings and the guard's log as they happen
 .build/debug/NimbusUpsBar --simulate [drain|shortBattery|upsLostInOutage|upsLostOnLine]
                                            a rehearsal in the terminal

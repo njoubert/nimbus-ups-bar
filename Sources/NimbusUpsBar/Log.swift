@@ -7,7 +7,7 @@ import os
 /// Every decision, reading and action, in one readable file:
 /// `~/Library/Logs/Nimbus UPS Bar/ups-bar.log`. The same lines go to the unified log
 /// (`log stream --predicate 'subsystem == "com.njoubert.nimbusupsbar"'`) and to a short ring
-/// the menu shows under Recent Events.
+/// the Inspector shows under Events.
 @MainActor
 final class Log {
     static let shared = Log()
@@ -22,7 +22,7 @@ final class Log {
     static let fileURL = directory.appendingPathComponent("ups-bar.log")
     /// Rotate once the file passes this; one older copy is kept as `ups-bar.log.1`.
     static let rotateAt = 8 * 1024 * 1024
-    static let ringSize = 200
+    static let ringSize = 1000
 
     private(set) var recent: [Entry] = []
     var onAppend: (() -> Void)?
@@ -40,7 +40,10 @@ final class Log {
         return f
     }()
 
+    static let didAppend = Notification.Name("com.njoubert.nimbusupsbar.logAppended")
+
     func append(_ line: String) {
+        defer { NotificationCenter.default.post(name: Log.didAppend, object: nil) }
         let now = Date()
         recent.append(Entry(date: now, line: line))
         if recent.count > Log.ringSize { recent.removeFirst(recent.count - Log.ringSize) }

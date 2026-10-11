@@ -24,6 +24,8 @@ enum CLI {
         case dumpHIDRaw(path: String)
         case afterSafe(action: String)
         case dumpSettings(dir: String)
+        case dumpInspector(dir: String)
+        case inspectJSON
     }
 
     static func run(_ cmd: Command) -> Int32 {
@@ -113,6 +115,48 @@ enum CLI {
                 do { try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path)); Swift.print("wrote \(path) (\(Int(v.bounds.width))×\(Int(v.bounds.height)))") }
                 catch { Swift.print("\(path): \(error)") }
             }
+            return 0
+
+        case .inspectJSON:
+            // The Inspector's snapshot without a window: what Copy All would put on the clipboard.
+            let m = UPSMonitor()
+            m.inspectorOpen = true
+            m.poll(reason: nil)
+            spin(1.0)
+            m.poll(reason: nil)
+            let model = InspectorModel(monitor: m, updater: nil)
+            model.refresh()
+            spin(0.5)                      // the launchctl probe
+            model.refresh()
+            Swift.print(model.snapshotJSON())
+            return 0
+
+        case .dumpInspector(let dir):
+            // The window on screen, each section as a table and as JSON: the layout check.
+            let m = UPSMonitor()
+            m.poll(reason: nil)
+            spin(1.0)
+            NSApplication.shared.appearance = NSAppearance(named: .darkAqua)
+            NSApp.setActivationPolicy(.accessory)
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let wc = InspectorWindowController(monitor: m, updater: nil)
+            wc.show()
+            spin(1.5)
+            for (i, e) in wc.sidebar.entries.enumerated() {
+                for json in [false, true] {
+                    if json, ["changes", "events", "log"].contains(e.id) { continue }
+                    wc.sidebar.select(e.id)
+                    wc.detail.selectMode(json: json)
+                    spin(0.5)
+                    guard let w = wc.window, let frame = w.contentView?.superview,
+                          let rep = frame.bitmapImageRepForCachingDisplay(in: frame.bounds) else { continue }
+                    frame.cacheDisplay(in: frame.bounds, to: rep)
+                    let path = "\(dir)/\(i)-\(e.id)\(json ? "-json" : "").png"
+                    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+                    Swift.print("wrote \(path)")
+                }
+            }
+            wc.close()
             return 0
 
         case .printMenu:

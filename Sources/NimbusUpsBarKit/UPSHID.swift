@@ -19,6 +19,8 @@ public final class UPSHID: @unchecked Sendable {
         public let label: String
         public let value: String
         public let raw: Int
+        /// Where it came from: the enclosing collection, the usage page, the usage.
+        public let key: Key
     }
 
     public struct Report: Equatable {
@@ -176,7 +178,7 @@ public final class UPSHID: @unchecked Sendable {
             // String-index usages (iProduct, iSerial, chemistry…) are USB string table slots,
             // not values; the device properties carry the strings themselves.
             if UPSHID.stringIndexes.contains(key.page << 8 | key.usage) { continue }
-            fields.append(Field(section: UPSHID.sectionName(key.section), label: UPSHID.label(key), value: UPSHID.format(key, v.value), raw: v.value))
+            fields.append(Field(section: UPSHID.sectionName(key.section), label: UPSHID.label(key), value: UPSHID.format(key, v.value), raw: v.value, key: key))
         }
 
         func get(_ section: UInt32, _ page: UInt32, _ usage: UInt32) -> Int? { map[Key(section: section, page: page, usage: usage)] }

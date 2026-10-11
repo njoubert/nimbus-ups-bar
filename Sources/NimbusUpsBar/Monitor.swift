@@ -55,6 +55,20 @@ final class UPSMonitor {
     private(set) var iops = UPSReading.absent()
     private(set) var internalBattery: PowerSources.InternalBattery?
     private(set) var hidReport: UPSHID.Report?
+    /// The undecoded elements behind `hidReport`, for the Inspector.
+    private(set) var hidRaw: UPSHID.RawReport?
+    /// Counters for the Inspector's Readings section, since launch.
+    private(set) var stats = Stats()
+    struct Stats {
+        var polls = 0
+        var powerSourceEvents = 0
+        var lastPowerSourceEventAt: TimeInterval?
+        var hidReads = 0
+        var hidEmpty = 0
+        var hidAbandoned = 0
+        var hidDropped = 0
+        let startedAt = Date()
+    }
     private(set) var hidReadAt: TimeInterval?
     private(set) var samples: [Sample] = []
     /// Set once any UPS has been seen this run, so "no UPS" can be told apart from "not yet read".
@@ -65,7 +79,18 @@ final class UPSMonitor {
     var menuOpen = false {
         didSet { if menuOpen, !oldValue { hidDue = 0; poll(reason: nil) } }
     }
+    /// The Inspector is on screen: read as often as on battery, so its values move.
+    var inspectorOpen = false {
+        didSet { if inspectorOpen, !oldValue { hidDue = 0; poll(reason: nil) } }
+    }
     var onChange: (() -> Void)?
+    /// Posted with every `onChange`, for listeners beyond the one closure (the Inspector).
+    static let didUpdate = Notification.Name("com.njoubert.nimbusupsbar.monitorUpdated")
+
+    private func changed() {
+        onChange?()
+        NotificationCenter.default.post(name: UPSMonitor.didUpdate, object: self)
+    }
 
     private var timer: Timer?
     private var hidDue: TimeInterval = 0
@@ -80,6 +105,9 @@ final class UPSMonitor {
     /// volumes a beat after registration, and a guard that looks before the replay sees an
     /// empty desk (and, resumed mid-outage with a sleep policy, would act on it).
     private var armedAt: TimeInterval = .infinity
+    /// The live guard is ticking: `start()` was called and the arming delay has passed. A
+    /// command-line look (`--inspect-json`, the dumps) never arms it.
+    var isArmed: Bool { armedAt == 0 }
     static let armDelay: TimeInterval = 3
     /// The wall-clock start of the outage the live guard is in, so a relaunch mid-outage (a
     /// crash restart, an update, toggling the agent) carries the clock on instead of
@@ -94,7 +122,7 @@ final class UPSMonitor {
         volumes = VolumeRegistry(remembered: Settings.shared.knownVolumes)
         live = OutageGuard(environment: RealEnvironment.placeholder, policy: Settings.shared.policy)
         live = OutageGuard(environment: environment, policy: settings.policy)
-        live.onChange = { [weak self] in self?.onChange?() }
+        live.onChange = { [weak self] in self?.changed() }
         volumes.onChange = { [weak self] in self?.volumesChanged() }
         power.onChange = { [weak self] in self?.poll(reason: "power source change") }
         hid.onDeviceChange = { [weak self] attached in
@@ -107,7 +135,7 @@ final class UPSMonitor {
             self.live.policy = self.settings.policy
             self.simulation?.guardian.policy = self.settings.policy
             if self.timer != nil, self.timer?.timeInterval != self.settings.busyReadInterval { self.startTimer() }
-            self.onChange?()
+            self.changed()
         }
         let ws = NSWorkspace.shared.notificationCenter
         observers.append(ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
@@ -158,7 +186,7 @@ final class UPSMonitor {
     /// The read cadence right now: the busy interval on battery, in a simulation, and while the
     /// menu is open; the line-power interval otherwise.
     var currentReadInterval: TimeInterval {
-        let busy = reading.onBattery || simulation != nil || menuOpen
+        let busy = reading.onBattery || simulation != nil || menuOpen || inspectorOpen
         return busy ? settings.busyReadInterval : settings.lineReadInterval
     }
 
@@ -172,7 +200,9 @@ final class UPSMonitor {
         internalBattery = snap.internalBattery
         if snap.ups.present { upsSeen = true }
         lastPollAt = now
-        let busy = snap.ups.onBattery || simulation != nil || menuOpen
+        stats.polls += 1
+        if reason == "power source change" { stats.powerSourceEvents += 1; stats.lastPowerSourceEventAt = now }
+        let busy = snap.ups.onBattery || simulation != nil || menuOpen || inspectorOpen
         let hidBusy = hidStartedAt.map { now - $0 < UPSMonitor.hidAbandonAfter } ?? false
         if now >= hidDue, !hidBusy, hid.isAttached {
             hidDue = now + (busy ? settings.busyReadInterval : settings.lineReadInterval)
@@ -184,26 +214,34 @@ final class UPSMonitor {
             record(reading, now: now)
         }
         tickGuards(now: now)
-        onChange?()
+        changed()
     }
 
     private func readHID(now: TimeInterval) {
-        if let s = hidStartedAt { log.append("a HID read started \(Duration.text(now - s)) ago has not returned; starting another") }
+        if let s = hidStartedAt {
+            stats.hidAbandoned += 1
+            log.append("a HID read started \(Duration.text(now - s)) ago has not returned; starting another")
+        }
         hidStartedAt = now
         hidSequence += 1
         let seq = hidSequence
         let hid = self.hid
         hidQueue.async { [weak self] in
-            let report = hid.read(now: now)
+            let raw = hid.fetch()
+            let report = raw.map { UPSHID.decode($0, now: now) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard let self, seq == self.hidSequence else { return }
+                    guard let self else { return }
+                    guard seq == self.hidSequence else { self.stats.hidDropped += 1; return }
                     self.hidStartedAt = nil
+                    self.stats.hidReads += 1
+                    if report == nil { self.stats.hidEmpty += 1 }
                     if let report {
+                        self.hidRaw = raw
                         self.hidReport = report
                         self.hidReadAt = monotonicNow()
                         self.reading = self.merge(iops: self.iops, hid: report, hidAt: self.hidReadAt, now: self.hidReadAt!)
-                        self.onChange?()
+                        self.changed()
                     }
                 }
             }
@@ -254,7 +292,7 @@ final class UPSMonitor {
     private func volumesChanged() {
         for v in volumes.mounted { settings.remember(v) }
         tickGuards(now: monotonicNow())
-        onChange?()
+        changed()
     }
 
     // MARK: Owner actions
@@ -325,7 +363,7 @@ final class UPSMonitor {
         let runtime = min(reading.runtimeSeconds ?? 40 * 60, 40 * 60)
         let outage = SimulatedOutage(template: reading.present ? reading : nil, initialRuntime: runtime, speed: speed, realNow: now, scenario: scenario)
         let g = OutageGuard(environment: env, policy: settings.policy)
-        g.onChange = { [weak self] in self?.onChange?() }
+        g.onChange = { [weak self] in self?.changed() }
         simulation = Simulation(kind: kind, outage: outage, guardian: g)
         log.append("\(kind.rawValue) started at \(Int(speed))× speed: \(scenario.title.lowercased()), battery good for \(Duration.text(TimeInterval(outage.initialRuntime)))")
         g.tick(UPSReading(present: true, name: outage.name, onBattery: false, chargePercent: 100, runtimeSeconds: runtime, timestamp: now))
@@ -357,7 +395,7 @@ final class UPSMonitor {
         // guard, which may be mid-outage right now: release it only when nothing live needs it.
         if ![.holding, .soft, .hard].contains(live.status.phase) { PowerActions.holdAwake(false) }
         live.tick(reading)
-        onChange?()
+        changed()
     }
 
     // MARK: Freshness

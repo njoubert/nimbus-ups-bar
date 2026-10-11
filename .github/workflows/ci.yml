@@ -36,6 +36,7 @@ jobs:
           run "$bin" --print
           run "$bin" --volumes
           run "$bin" --print-menu
+          run "$bin" --inspect-json | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['guard']['armed'] is False; print(sorted(d))"
           run "$bin" --agent-status || true
           for s in drain shortBattery upsLostInOutage upsLostOnLine; do run "$bin" --simulate "$s"; done
       - name: Build release

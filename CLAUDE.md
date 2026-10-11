@@ -56,7 +56,7 @@ README before changing the policy or the stages.
   the headline, the chart, the Settings window, notifications, the icon, the DMG. Show the
   state the change is about (hovered, empty, light and dark where it matters), before and after
   when it changes something existing. Render with the dump flags rather than asking for a
-  screen: `--dump-chart`, `--dump-settings`, `--dump-bar`, `--render-dmg-background`; for what
+  screen: `--dump-chart`, `--dump-settings`, `--dump-inspector`, `--dump-bar`, `--render-dmg-background`; for what
   they do not cover (the open menu as a whole), ask the owner for one.
 - **Where the images live:** `gh` cannot upload images into a PR body, so they go on the orphan
   branch `pr-assets` (never merged; screenshots and the repo's `.pre-commit-config.yaml`, so its
@@ -93,6 +93,10 @@ Sources/NimbusUpsBarKit/     the platform layer, a library so it is testable (Ap
   Holders.swift              proc_listpidspath → Holder; describe (pure); quit by bundle id
   Health.swift               the health rules → [Item] with a level (pure)
   Merge.swift                ReadingMerge: IOKit's entry + a fresh HID report → one reading (pure)
+  Inspector.swift            the Inspector's data: Section/Row, the UPS / power source / health /
+                             guard / volumes sections, JSON (sorted, pretty), the change diff (pure)
+  Launchd.swift              `launchctl print gui/<uid>/<label>` and its parser (the agent's job)
+  LogEvent.swift             a log line's kind (outage, stage, apps, volume, …) for Events (pure)
 Sources/NimbusUpsBar/        the app
   main.swift                 flags, AppDelegate, single-instance rule, agent toggling
   CLI.swift                  --print / --print-menu / --watch / --simulate / --holders / --volumes
@@ -106,21 +110,26 @@ Sources/NimbusUpsBar/        the app
                              the pre-2026-10-11 grace/hard/afterSafe keys over once, keeping them),
                              read intervals, chart span, volume mode and selection, known volumes;
                              every setter posts Settings.didChange
+  InspectorModel.swift       the Inspector's sections from the monitor, plus readings and agent;
+                             the change log, the flash stamps, the whole snapshot as JSON
+  InspectorWindow.swift      the Inspector window: sidebar, Table/JSON, Copy, Copy All, flash rows
   SettingsWindow.swift       the Settings window: NSTabViewController with toolbar tabs, the four
                              panes, Form/Controls helpers, DurationFormatter, the main menu
-  Log.swift                  the log file, the ring for Recent Events, os_log
+  Log.swift                  the log file, the ring the Inspector's Events shows (1000 lines), os_log
   Notifications.swift        UNUserNotificationCenter (bundle only)
   BackgroundAgent.swift      SMAppService.agent + the plist text build.sh bakes in
   PowerActions.swift         sleep assertion, IOPMSleepSystem, the loginwindow shutdown event
-  StatusBarController.swift  the bar, the menu, every submenu, menuText() for --print-menu
+  StatusBarController.swift  the bar, the menu, every submenu (UPS Details moved to the Inspector),
+                             menuText() for --print-menu
   HeadlineView.swift         the phase + three figures at the top of the menu
   ChartView.swift            load and charge, two panels, time ticks, newest values in the headers,
                              the charge limit, outage bands, hover readout
   AppIcon.swift, DMGBackground.swift, Updates.swift   as in the siblings
 Tests/UpsGuardCoreTests/     76 scenarios against FakeEnvironment, each rehearsal scenario among them
-Tests/NimbusUpsBarKitTests/  47 checks: the HID decode against Fixtures/cp1500pfclcda.json and
-                             hand-made maps, every health rule, the DA dictionary filter, the
-                             holder resolver, the merge
+Tests/NimbusUpsBarKitTests/  57 checks: the HID decode against Fixtures/cp1500pfclcda.json and
+                             hand-made maps, every health rule (and that each menu row fits), the
+                             DA dictionary filter, the holder resolver, the merge, the Inspector's
+                             sections, JSON and diff, the launchctl parser, the log-line kinds
 docs/                        icon.png (build.sh icon); phase-2-email-notifications.md (design)
 build.sh                     build / test / run / stop / app / dmg / release / install /
                              uninstall / status / icon / clean
@@ -137,10 +146,14 @@ main.
 
 ```
 ./build.sh run [--fg]         debug build as dist/debug/Nimbus UPS Bar.app (quits any running copy first)
-./build.sh test               swift test: the 76 guard scenarios and the 47 platform checks
+./build.sh test               swift test: the 76 guard scenarios and the 57 platform checks
 ./build.sh install            release → /Applications, register the agent (owner's call), launch
 .build/debug/NimbusUpsBar --print        the UPS, health, every HID field, volumes, holders, policy
 .build/debug/NimbusUpsBar --print-menu   the menu built against the real UPS, as an indented tree
+.build/debug/NimbusUpsBar --inspect-json the Inspector's snapshot (every section as JSON); the guard
+                                         is never armed in it, and its Guard section says so
+.build/debug/NimbusUpsBar --dump-inspector D   the Inspector on screen, each section → D/N-id.png
+                                         (and N-id-json.png): its layout check
 .build/debug/NimbusUpsBar --watch        readings + the guard's log as they happen (Ctrl-C)
 .build/debug/NimbusUpsBar --simulate [S] a rehearsal in the terminal (~30 s; touches nothing); S is
                                          drain (default), shortBattery, upsLostInOutage, upsLostOnLine
@@ -212,7 +225,7 @@ the end, so `safe` is reached the moment the last volume lands rather than two s
   fires on changes; it is scheduled in `.commonModes` so it fires with the menu open.
 - **The IOKit entry's `Voltage` key is not the line voltage.** `ioupsd` writes whichever voltage
   element it read last: 122000 mV at one read, 27100 (the battery) a minute later. The app ignores
-  it (it still shows under UPS Details › macOS power source) and takes every voltage from HID.
+  it (it still shows in the Inspector › Power Source) and takes every voltage from HID.
 - **The HID report is the richer source**, read through `IOHIDManager` with a shared open
   (`ioupsd` keeps its own). 58 unique elements on the CP1500PFCLCDa; a full read is ~30 ms (11 ms
   seen). Elements are keyed by (enclosing collection, page, usage): `Voltage` 0x84/0x30 exists
