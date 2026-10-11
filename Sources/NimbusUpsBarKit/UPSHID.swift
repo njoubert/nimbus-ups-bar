@@ -314,15 +314,39 @@ public final class UPSHID: @unchecked Sendable {
         }
     }
 
-    /// The device's IORegistry properties, each as text.
+    /// The device's IORegistry properties, each as text: strings as they are, numbers as
+    /// numbers, data as hex, and dictionaries and arrays as compact JSON (keys sorted, data
+    /// inside as hex), so a nested property reads on one line and parses back.
     private static func properties(_ dev: IOHIDDevice) -> [String: String] {
         let service = IOHIDDeviceGetService(dev)
         var out: Unmanaged<CFMutableDictionary>?
         guard service != 0, IORegistryEntryCreateCFProperties(service, &out, kCFAllocatorDefault, 0) == KERN_SUCCESS,
               let dict = out?.takeRetainedValue() as? [String: Any] else { return [:] }
-        return dict.mapValues { v in
-            if let d = v as? Data { return d.map { String(format: "%02x", $0) }.joined() }
+        return dict.mapValues(propertyText)
+    }
+
+    static func propertyText(_ v: Any) -> String {
+        switch v {
+        case let s as String: return s
+        case let d as Data: return d.map { String(format: "%02x", $0) }.joined()
+        case let n as NSNumber: return CFGetTypeID(n) == CFBooleanGetTypeID() ? (n.boolValue ? "true" : "false") : n.stringValue
+        default:
+            let clean = jsonSafe(v)
+            if JSONSerialization.isValidJSONObject(clean),
+               let data = try? JSONSerialization.data(withJSONObject: clean, options: [.sortedKeys, .withoutEscapingSlashes]),
+               let text = String(data: data, encoding: .utf8) { return text }
             return "\(v)"
+        }
+    }
+
+    private static func jsonSafe(_ v: Any) -> Any {
+        switch v {
+        case let s as String: return s
+        case let d as Data: return d.map { String(format: "%02x", $0) }.joined()
+        case let n as NSNumber: return n
+        case let a as [Any]: return a.map(jsonSafe)
+        case let d as [String: Any]: return d.mapValues(jsonSafe)
+        default: return "\(v)"
         }
     }
 

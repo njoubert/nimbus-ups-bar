@@ -519,10 +519,8 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
             let f = DateFormatter(); f.dateFormat = Calendar.current.isDateInToday(date) ? "HH:mm:ss" : "MMM d HH:mm:ss"
             let id = tableColumn?.identifier.rawValue ?? "label"
             let cell = NSTableCellView()
-            let t = NSTextField(labelWithString: id == "label" ? f.string(from: date) : id == "value" ? line : kind.title)
-            t.lineBreakMode = .byTruncatingTail
-            t.isSelectable = true
-            t.toolTip = line
+            let t = InspectorDetail.oneLineLabel(id == "label" ? f.string(from: date) : id == "value" ? line : kind.title)
+            t.toolTip = InspectorDetail.tip(line)
             t.translatesAutoresizingMaskIntoConstraints = false
             if id == "label" { t.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular); t.textColor = .secondaryLabelColor }
             if id == "detail" { t.textColor = .secondaryLabelColor; t.font = .systemFont(ofSize: NSFont.smallSystemFontSize) }
@@ -556,10 +554,7 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
             default: value = r.detail ?? ""
             }
             let cell = NSTableCellView()
-            let t = NSTextField(labelWithString: value)
-            t.lineBreakMode = .byTruncatingTail
-            t.isSelectable = true
-            t.toolTip = value.isEmpty ? nil : value
+            let t = InspectorDetail.oneLineLabel(value)
             if id == "value" { t.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .medium) }
             if id == "detail" { t.textColor = .secondaryLabelColor; t.font = .systemFont(ofSize: NSFont.smallSystemFontSize) }
             t.translatesAutoresizingMaskIntoConstraints = false
@@ -588,6 +583,25 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
 }
 
 extension InspectorDetail {
+    /// A table cell's text: one line whatever the value holds (a property's JSON, a long path),
+    /// cut with "…"; the whole value is in the tooltip and in the JSON view.
+    static func oneLineLabel(_ value: String) -> NSTextField {
+        let t = NSTextField(labelWithString: value.split(whereSeparator: \.isWhitespace).joined(separator: " "))
+        t.usesSingleLineMode = true
+        t.maximumNumberOfLines = 1
+        t.cell?.wraps = false
+        t.lineBreakMode = .byTruncatingTail
+        t.isSelectable = true
+        t.toolTip = tip(value)
+        return t
+    }
+
+    /// Tooltips past a few thousand characters stop being readable: say where the rest is.
+    static func tip(_ value: String) -> String? {
+        guard !value.isEmpty else { return nil }
+        return value.count > 3000 ? String(value.prefix(3000)) + "… (the whole value is in the JSON view)" : value
+    }
+
     /// Status colours for the kinds that are about the outage; the rest stay neutral.
     static func color(_ k: LogEvent.Kind) -> NSColor {
         switch k {

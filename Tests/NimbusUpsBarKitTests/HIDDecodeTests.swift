@@ -205,4 +205,19 @@ final class HIDDecodeTests: XCTestCase {
         ])
         XCTAssertEqual(UPSHID.decode(raw, now: 0).reading.chargePercent, 81)
     }
+
+    func testDevicePropertiesAreOneLineAndParseBack() throws {
+        XCTAssertEqual(UPSHID.propertyText("CP1500PFCLCDa"), "CP1500PFCLCDa")
+        XCTAssertEqual(UPSHID.propertyText(NSNumber(value: 1892)), "1892")
+        XCTAssertEqual(UPSHID.propertyText(kCFBooleanTrue as Any), "true")
+        XCTAssertEqual(UPSHID.propertyText(Data([0x05, 0x84])), "0584")
+        let nested: [Any] = [["DeviceUsagePage": 132, "DeviceUsage": 4], ["Blob": Data([0xAB])]]
+        XCTAssertEqual(UPSHID.propertyText(nested), #"[{"DeviceUsage":4,"DeviceUsagePage":132},{"Blob":"ab"}]"#)
+        // The captured device: no property spans lines, and the nested ones are JSON.
+        let raw = try fixture("cp1500pfclcda-full")
+        let props = try XCTUnwrap(raw.properties)
+        XCTAssertTrue(props.values.allSatisfy { !$0.contains("\n") })
+        let pairs = try XCTUnwrap(props["DeviceUsagePairs"])
+        XCTAssertNotNil(try JSONSerialization.jsonObject(with: Data(pairs.utf8)) as? [Any])
+    }
 }
