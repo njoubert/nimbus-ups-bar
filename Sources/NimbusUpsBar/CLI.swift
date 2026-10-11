@@ -118,7 +118,7 @@ enum CLI {
             return 0
 
         case .inspectJSON:
-            // The Inspector's snapshot without a window: what Copy All would put on the clipboard.
+            // Every Inspector page in one JSON document, without a window: the whole snapshot for an agent.
             let m = UPSMonitor()
             m.inspectorOpen = true
             m.poll(reason: nil)
@@ -144,7 +144,7 @@ enum CLI {
             spin(1.5)
             for (i, e) in wc.sidebar.entries.enumerated() {
                 for json in [false, true] {
-                    if json, ["changes", "events", "log"].contains(e.id) { continue }
+                    if json, ["changes", "events"].contains(e.id) { continue }  // their JSON is a log list
                     wc.sidebar.select(e.id)
                     wc.detail.selectMode(json: json)
                     spin(0.5)

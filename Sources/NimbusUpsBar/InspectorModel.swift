@@ -183,12 +183,14 @@ final class InspectorModel {
     // MARK: Snapshot
 
     /// Everything, for an agent: every section's JSON, the recent changes and the log tail.
-    func snapshotJSON(includeLog: Bool = true) -> String {
+    func snapshotJSON(includeLog: Bool = true) -> String { Inspector.json(snapshot(includeLog: includeLog)) }
+
+    func snapshot(includeLog: Bool = true) -> [String: Any] {
         var all: [String: Any] = ["capturedAt": Inspector.iso(Date()), "app": "Nimbus UPS Bar"]
         for s in sections { all[s.id] = s.json }
         all["changes"] = changesJSON(limit: 200)
         if includeLog { all["log"] = logJSON(limit: 200) }
-        return Inspector.json(all)
+        return all
     }
 
     func changesJSON(limit: Int = InspectorModel.maxChanges) -> [[String: Any]] {

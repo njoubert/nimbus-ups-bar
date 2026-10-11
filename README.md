@@ -86,20 +86,22 @@ any moment. Then:
   Now* / *Mount*, its UUID, device, mount point, drive model, and the processes holding it.
 - **UPS Health**: the checks below, each with a dot, and *Run Battery Self-Test…*, the UPS's own
   ten-second quick test.
-- **Inspector…** (⌘I): a window with everything the app knows, live. A sidebar of sections: every
+- **Inspector…** (⌘I): a window with everything the app knows, live. *Unified* puts every page in
+  one table (and its JSON adds the recent changes and the log tail; *Copy All* copies it, the same
+  document `--inspect-json` prints). Then a page per section: every
   field the UPS reports over USB HID (decoded, with each element's collection, page, usage and raw
   value), the entry macOS keeps for it (`pmset -g ps`) and the Mac's own battery, the health
   checks, the outage guard (phase, countdowns, the policy it runs), the protected volumes and who
   holds them, how the readings are taken (cadence, read counts, failures, power-source events),
   and the background agent and this copy (SMAppService status, the launchd job's state, pid, runs
   and last exit code, the bundle, the version). Each section is a table whose rows flash when a
-  value changes, or the same as JSON; *Copy* puts the section's JSON on the clipboard and *Copy
-  All* the whole snapshot, the form to paste into an agent. *Changes* lists every value that moved
+  value changes, or the same as JSON; *Copy Page* puts the page's JSON on the clipboard, the form
+  to paste into an agent. *Changes* lists every value that moved
   since the window opened, with the old and the new. *Events* is what the app decided and did,
   newest first, each line with an icon and a colour for its kind (outage, stage, apps, volumes,
-  the UPS, problems, rehearsals; the once-a-minute progress lines on request). *Log File* is the
-  whole text log, `~/Library/Logs/Nimbus UPS Bar/ups-bar.log`, followed as it grows and searchable
-  with ⌘F, with *Open Log File* and *Show in Finder*. While the Inspector is on screen the UPS is
+  the UPS, problems, rehearsals; the once-a-minute progress lines on request),
+  read from the text log `~/Library/Logs/Nimbus UPS Bar/ups-bar.log`, with *Open Log File* and
+  *Show in Finder*. While the Inspector is on screen the UPS is
   read as often as on battery.
 - **Simulate an Outage**: a **rehearsal** (a pretend outage at 10× speed against the real volumes
   and the real apps holding them, under the current policy; it logs what it would do and touches
@@ -209,7 +211,7 @@ The command line has the same readers and the same guard with no UI:
 ```
 .build/debug/NimbusUpsBar --print          everything the menu would show, as text
 .build/debug/NimbusUpsBar --print-menu     the menu itself, built against the real UPS, as a tree
-.build/debug/NimbusUpsBar --inspect-json   the Inspector's snapshot as JSON (what Copy All copies)
+.build/debug/NimbusUpsBar --inspect-json   every Inspector page in one JSON document
 .build/debug/NimbusUpsBar --watch          readings and the guard's log as they happen
 .build/debug/NimbusUpsBar --simulate [drain|shortBattery|upsLostInOutage|upsLostOnLine]
                                            a rehearsal in the terminal

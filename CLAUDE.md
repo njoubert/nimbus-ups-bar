@@ -112,10 +112,10 @@ Sources/NimbusUpsBar/        the app
                              every setter posts Settings.didChange
   InspectorModel.swift       the Inspector's sections from the monitor, plus readings and agent;
                              the change log, the flash stamps, the whole snapshot as JSON
-  InspectorWindow.swift      the Inspector window: sidebar, Table/JSON, Copy, Copy All, flash rows
+  InspectorWindow.swift      the Inspector window: sidebar, Table/JSON, Copy Page, flash rows
   SettingsWindow.swift       the Settings window: NSTabViewController with toolbar tabs, the four
                              panes, Form/Controls helpers, DurationFormatter, the main menu
-  Log.swift                  the log file, the ring the Inspector's Events shows (1000 lines), os_log
+  Log.swift                  the log file (the Inspector's Events reads its tail), a 1000-line ring, os_log
   Notifications.swift        UNUserNotificationCenter (bundle only)
   BackgroundAgent.swift      SMAppService.agent + the plist text build.sh bakes in
   PowerActions.swift         sleep assertion, IOPMSleepSystem, the loginwindow shutdown event

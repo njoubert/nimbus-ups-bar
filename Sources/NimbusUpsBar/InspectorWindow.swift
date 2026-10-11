@@ -8,7 +8,7 @@ import UpsGuardCore
 /// The Inspector: everything the app knows, live. A sidebar of sections (the UPS over USB,
 /// macOS's entry, health, the guard, the volumes, the readings, the background agent, what
 /// changed, the log); each shows as a table whose changed rows flash, or as the JSON an agent
-/// can be handed, with a Copy button for either and Copy All for the whole snapshot. While it
+/// can be handed, with Copy Page for either (`--inspect-json` prints the whole snapshot). While it
 /// is on screen the UPS is read as often as on battery.
 @MainActor
 final class InspectorWindowController: NSWindowController, NSWindowDelegate {
@@ -40,7 +40,7 @@ final class InspectorWindowController: NSWindowController, NSWindowDelegate {
         sidebar.onSelect = { [weak self] id in self?.detail.show(id) }
         model.refresh()
         sidebar.reload()
-        sidebar.select("ups")
+        sidebar.select("unified")
         for name in [UPSMonitor.didUpdate, Log.didAppend] {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.scheduleRefresh() }
@@ -117,10 +117,10 @@ final class InspectorSidebar: NSViewController, NSTableViewDataSource, NSTableVi
     }
 
     func reload() {
-        var e = model.sections.map { (id: $0.id, title: $0.title, symbol: $0.symbol, badge: nil as String?) }
+        var e = [(id: "unified", title: "Unified", symbol: "square.stack.3d.up", badge: nil as String?)]
+        e += model.sections.map { (id: $0.id, title: $0.title, symbol: $0.symbol, badge: nil as String?) }
         e.append((id: "changes", title: "Changes", symbol: "arrow.triangle.2.circlepath", badge: model.changes.isEmpty ? nil : "\(min(model.changes.count, 999))"))
         e.append((id: "events", title: "Events", symbol: "list.bullet.rectangle", badge: nil))
-        e.append((id: "log", title: "Log File", symbol: "doc.plaintext", badge: nil))
         let selected = table.selectedRow >= 0 && table.selectedRow < entries.count ? entries[table.selectedRow].id : nil
         let structural = e.map(\.id) != entries.map(\.id)
         entries = e
@@ -169,7 +169,7 @@ final class InspectorSidebar: NSViewController, NSTableViewDataSource, NSTableVi
 
 // MARK: - Detail
 
-/// One section: a header (title, how fresh, Table/JSON, Copy, Copy All) over the table or the
+/// One section: a header (title, how fresh, Table/JSON, Copy Page) over the table or the
 /// JSON text.
 @MainActor
 final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
@@ -183,17 +183,12 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
     private let text = NSTextView()
     private let textScroll = NSScrollView()
     private var copied: NSButton!
-    /// A section's own actions: Show Progress under Events, Clear under Changes, Open Log File
-    /// and Show in Finder under Log File.
+    /// A section's own actions: Show Progress, Open Log File and Show in Finder under Events
+    /// (which has no copy button), Clear under Changes.
     private var extra: NSButton!
     private var extra2: NSButton!
+    private var openLog: NSButton!
     private var showProgress = false
-    /// The Log File view: the file's tail, followed as it grows.
-    private let logText = NSTextView()
-    private let logScroll = NSScrollView()
-    private var logOffset: UInt64 = 0
-    private var logPathShown = ""
-    static let logTail: UInt64 = 2_000_000
 
     /// What the table shows: a group heading or a row (with the flash key).
     private enum Line { case group(String); case row(Inspector.Row, flashKey: String?); case event(LogEvent.Kind, Date, String) }
@@ -215,12 +210,9 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
         mode.selectedSegment = 0
         mode.target = self
         mode.action = #selector(modeChanged)
-        copied = NSButton(title: "Copy", target: self, action: #selector(copySection))
-        copied.toolTip = "Copy this section as JSON (in Table view too): the form to paste into an agent."
-        let copyAll = NSButton(title: "Copy All", target: self, action: #selector(copyAll))
-        copyAll.toolTip = "Copy every section, the recent changes and the log tail as one JSON document."
+        copied = NSButton(title: "Copy Page", target: self, action: #selector(copySection))
 
-        for (id, title, width) in [("label", "Field", 250.0), ("value", "Value", 400.0), ("detail", "Detail", 260.0)] {
+        for (id, title, width) in [("label", "Field", 230.0), ("value", "Value", 290.0), ("detail", "Detail", 210.0)] {
             let c = NSTableColumn(identifier: .init(id))
             c.title = title
             c.width = width
@@ -246,17 +238,6 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
         textScroll.documentView = text
         textScroll.hasVerticalScroller = true
         textScroll.isHidden = true
-        logText.isEditable = false
-        logText.isSelectable = true
-        logText.usesFindBar = true
-        logText.isIncrementalSearchingEnabled = true
-        logText.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        logText.textContainerInset = NSSize(width: 10, height: 10)
-        logText.isVerticallyResizable = true
-        logText.autoresizingMask = [.width]
-        logScroll.documentView = logText
-        logScroll.hasVerticalScroller = true
-        logScroll.isHidden = true
 
         let titles = NSStackView(views: [titleLabel, subtitle])
         titles.orientation = .vertical
@@ -264,19 +245,22 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
         titles.spacing = 2
         extra = NSButton(title: "", target: self, action: #selector(extraAction))
         extra.isHidden = true
+        openLog = NSButton(title: "Open Log File", target: self, action: #selector(openLogFile))
+        openLog.toolTip = Log.fileURL.path
+        openLog.isHidden = true
         extra2 = NSButton(title: "Show in Finder", target: self, action: #selector(revealLog))
+        extra2.toolTip = Log.fileURL.path
         extra2.isHidden = true
-        let buttons = NSStackView(views: [extra, extra2, mode, copied, copyAll])
+        let buttons = NSStackView(views: [extra, mode, openLog, extra2, copied])
         buttons.spacing = 8
         // The buttons are pinned to the right edge, so they stay put in every section whatever
-        // the title and subtitle say; "Copied" does not resize its button either. A section's
-        // own buttons (Show Progress, Open Log File…) grow leftwards from the segmented control.
+        // the title and subtitle say; "Copied" does not resize Copy Page either. A section's
+        // own buttons (Show Progress, Clear) grow leftwards; Events trades Copy Page for the log buttons from the segmented control.
         titles.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         subtitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         buttons.setContentHuggingPriority(.required, for: .horizontal)
-        copied.widthAnchor.constraint(equalToConstant: 76).isActive = true
-        copyAll.widthAnchor.constraint(equalToConstant: 84).isActive = true
-        for x in [titles, buttons, tableScroll, textScroll, logScroll] as [NSView] { x.translatesAutoresizingMaskIntoConstraints = false; v.addSubview(x) }
+        copied.widthAnchor.constraint(equalToConstant: 96).isActive = true
+        for x in [titles, buttons, tableScroll, textScroll] as [NSView] { x.translatesAutoresizingMaskIntoConstraints = false; v.addSubview(x) }
         NSLayoutConstraint.activate([
             titles.topAnchor.constraint(equalTo: v.safeAreaLayoutGuide.topAnchor, constant: 12),
             titles.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 20),
@@ -291,10 +275,6 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
             textScroll.leadingAnchor.constraint(equalTo: v.leadingAnchor),
             textScroll.trailingAnchor.constraint(equalTo: v.trailingAnchor),
             textScroll.bottomAnchor.constraint(equalTo: v.bottomAnchor),
-            logScroll.topAnchor.constraint(equalTo: tableScroll.topAnchor),
-            logScroll.leadingAnchor.constraint(equalTo: v.leadingAnchor),
-            logScroll.trailingAnchor.constraint(equalTo: v.trailingAnchor),
-            logScroll.bottomAnchor.constraint(equalTo: v.bottomAnchor),
             v.widthAnchor.constraint(greaterThanOrEqualToConstant: 520),
         ])
         view = v
@@ -316,18 +296,23 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
         reload(force: true)
     }
 
+    /// The copy button reads Copy All on the Unified page, which is everything.
+    private var copyTitle: String { current == "unified" ? "Copy All" : "Copy Page" }
+
     private func layoutFor(_ id: String) {
-        let isLog = id == "log"
-        mode.isHidden = isLog
-        tableScroll.isHidden = isLog || showingJSON
-        textScroll.isHidden = isLog || !showingJSON
-        logScroll.isHidden = !isLog
-        extra.isHidden = !["events", "changes", "log"].contains(id)
-        extra2.isHidden = !isLog
+        if copied.title != "Copied" { copied.title = copyTitle }
+        copied.toolTip = current == "unified"
+            ? "Copy every page, the recent changes and the log tail as one JSON document (what --inspect-json prints): the form to paste into an agent."
+            : "Copy this page as JSON (in Table view too): the form to paste into an agent."
+        tableScroll.isHidden = showingJSON
+        textScroll.isHidden = !showingJSON
+        extra.isHidden = !["events", "changes"].contains(id)
+        extra2.isHidden = id != "events"
+        openLog.isHidden = id != "events"
+        copied.isHidden = id == "events"
         switch id {
         case "events": extra.title = showProgress ? "Hide Progress Lines" : "Show Progress Lines"; extra.toolTip = "The once-a-minute \"on battery …\" readings during an outage"
-        case "changes": extra.title = "Clear"; extra.toolTip = "Forget the changes seen so far"
-        default: extra.title = "Open Log File"; extra.toolTip = Log.fileURL.path
+        default: extra.title = "Clear"; extra.toolTip = "Forget the changes seen so far"
         }
         let titles: [String]
         switch id {
@@ -344,8 +329,9 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
 
     private func currentJSON() -> Any {
         switch current {
+        case "unified": return model.snapshot()
         case "changes": return model.changesJSON()
-        case "events", "log": return model.logJSON()
+        case "events": return model.logJSON()
         default: return section?.json ?? [:]
         }
     }
@@ -366,10 +352,19 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
             let shown = all.filter { showProgress || !$0.0.isRoutine }
             subtitle.stringValue = "What the app decided and did, newest first, from the log file · \(shown.count) of its last \(all.count) lines"
             lines = shown.map { .event($0.0, $0.1.0, $0.1.1) }
-        case "log":
-            titleLabel.stringValue = "Log File"
-            followLog(force: force)
-            return
+        case "unified":
+            titleLabel.stringValue = "Unified"
+            subtitle.stringValue = "Every page in one place; the JSON adds the recent changes and the log · updated \(f.string(from: model.updatedAt))"
+            var out: [Line] = []
+            var heading = ""
+            for s in model.sections {
+                for r in s.rows {
+                    let h = s.title + (r.group.map { " › " + $0 } ?? "")
+                    if h != heading { out.append(.group(h)); heading = h }
+                    out.append(.row(r, flashKey: s.id + " › " + r.key))
+                }
+            }
+            lines = out
         default:
             guard let s = section else { return }
             titleLabel.stringValue = s.title
@@ -400,51 +395,19 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
 
     @objc private func extraAction() {
         switch current {
-        case "log": NSWorkspace.shared.open(Log.fileURL)
         case "events": showProgress.toggle(); reload(force: true)
         default: model.clearChanges(); reload(force: true)
         }
     }
 
+    @objc private func openLogFile() { NSWorkspace.shared.open(Log.fileURL) }
+
     @objc private func revealLog() { NSWorkspace.shared.activateFileViewerSelecting([Log.fileURL]) }
 
     @objc private func copySection() {
-        put(current == "log" ? logText.string : Inspector.json(currentJSON()), on: copied, title: "Copy")
+        put(Inspector.json(currentJSON()), on: copied, title: copyTitle)
     }
 
-    /// The log file's last `logTail` bytes, then whatever is appended, keeping the view at the
-    /// bottom when it was there. A file that shrank (rotated, deleted) is read again from its tail.
-    private func followLog(force: Bool) {
-        let url = Log.fileURL
-        let size = ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.uint64Value ?? 0
-        let atBottom = logScroll.contentView.bounds.maxY >= (logText.frame.height - 20)
-        if force || size < logOffset || logPathShown != url.path {
-            logOffset = size > InspectorDetail.logTail ? size - InspectorDetail.logTail : 0
-            logText.string = ""
-            logPathShown = url.path
-        }
-        if size > logOffset, let h = try? FileHandle(forReadingFrom: url) {
-            try? h.seek(toOffset: logOffset)
-            let data = h.readDataToEndOfFile()
-            try? h.close()
-            logOffset += UInt64(data.count)
-            var chunk = String(decoding: data, as: UTF8.self)
-            if logText.string.isEmpty, logOffset > UInt64(data.count), let nl = chunk.firstIndex(of: "\n") {
-                chunk = String(chunk[chunk.index(after: nl)...])   // start on a whole line
-            }
-            logText.textStorage?.append(NSAttributedString(string: chunk, attributes: [
-                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular), .foregroundColor: NSColor.labelColor]))
-            if force || atBottom { logText.scrollToEndOfDocument(nil) }
-        }
-        let mb = Double(size) / 1_000_000
-        subtitle.stringValue = "\(url.path) · \(String(format: mb < 0.1 ? "%.0f KB" : "%.1f MB", mb < 0.1 ? Double(size) / 1000 : mb))"
-            + (size > InspectorDetail.logTail ? " · showing the last 2 MB" : "") + " · ⌘F to search"
-        subtitle.toolTip = subtitle.stringValue
-    }
-
-    @objc private func copyAll(_ sender: NSButton) {
-        put(model.snapshotJSON(), on: sender, title: "Copy All")
-    }
 
     private func put(_ s: String, on button: NSButton, title: String) {
         NSPasteboard.general.clearContents()
