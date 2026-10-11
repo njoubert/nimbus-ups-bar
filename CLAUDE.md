@@ -45,6 +45,27 @@ README before changing the policy or the stages.
   must keep saying exactly this.
 - **Resolve volumes by UUID**, never by `diskN` (those get reused) or by name alone.
 
+## Workflow
+
+- **Changes go up as pull requests.** Branch from `main`, commit there, push, `gh pr create`
+  against `main`; the owner reviews and says when to merge. Do not commit or push to `main`
+  directly unless the owner explicitly says to commit straight to `main` for that change; an
+  earlier instruction to do so does not carry over to the next change. Landing a PR (merge,
+  delete the branch) is also the owner's call.
+- **A PR that touches anything the owner sees gets a screenshot in its description**: the menu,
+  the headline, the chart, the Settings window, notifications, the icon, the DMG. Show the
+  state the change is about (hovered, empty, light and dark where it matters), before and after
+  when it changes something existing. Render with the dump flags rather than asking for a
+  screen: `--dump-chart`, `--dump-settings`, `--dump-bar`, `--render-dmg-background`; for what
+  they do not cover (the open menu as a whole), ask the owner for one.
+- **Where the images live:** `gh` cannot upload images into a PR body, so they go on the orphan
+  branch `pr-assets` (never merged; nothing else on it), under `pr-<number>/`, and the description
+  links them as `https://raw.githubusercontent.com/njoubert/nimbus-ups-bar/pr-assets/pr-<number>/<file>.png`
+  (the repo is public, so they render). Push them with a worktree so the working branch is not
+  disturbed: `git worktree add <scratch dir> pr-assets`, copy,
+  commit, push, `git worktree remove`. Add the images after `gh pr create` gives the number,
+  then `gh pr edit <n> --body-file …`.
+
 ## Layout
 
 ```
