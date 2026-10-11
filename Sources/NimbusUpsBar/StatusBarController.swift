@@ -310,7 +310,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         let inspector = NSMenuItem(title: "Inspector…", action: #selector(openInspector), keyEquivalent: "i")
         inspector.target = self
         // Settings… gets its gear from macOS (a standard item); this one needs its symbol set.
-        inspector.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: "Inspector")
+        inspector.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Inspector")
         inspector.toolTip = "Everything the UPS reports, live, with the guard, the volumes, the readings and the background agent; each section copyable as JSON."
         menu.addItem(inspector)
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
