@@ -99,9 +99,9 @@ any moment. Then:
   to paste into an agent. *Changes* lists every value that moved
   since the window opened, with the old and the new. *Events* is what the app decided and did,
   newest first, each line with an icon and a colour for its kind (outage, stage, apps, volumes,
-  the UPS, problems, rehearsals; the once-a-minute progress lines on request). *Log File* is the
-  whole text log, `~/Library/Logs/Nimbus UPS Bar/ups-bar.log`, followed as it grows and searchable
-  with ⌘F, with *Open Log File* and *Show in Finder*. While the Inspector is on screen the UPS is
+  the UPS, problems, rehearsals; the once-a-minute progress lines on request),
+  read from the text log `~/Library/Logs/Nimbus UPS Bar/ups-bar.log`, with *Open Log File* and
+  *Show in Finder*. While the Inspector is on screen the UPS is
   read as often as on battery.
 - **Simulate an Outage**: a **rehearsal** (a pretend outage at 10× speed against the real volumes
   and the real apps holding them, under the current policy; it logs what it would do and touches
