@@ -244,6 +244,10 @@ the end, so `safe` is reached the moment the last volume lands rather than two s
   does GET_REPORT for input report 0. The decode reads the first input or feature element of
   each (enclosing collection, page, usage), 58 of them, ~30 ms; `Voltage` 0x84/0x30 exists
   under Input, Output and the battery's PowerSummary, which the key tells apart.
+- **IOHIDManager reports the UPS already plugged in as an arrival** once the run loop turns
+  after `IOHIDManagerOpen`, at every launch. `UPSHID` takes `IOHIDManagerCopyDevices` right after
+  the open and passes `atStart` for those, so the log records only a real plug or unplug (it
+  used to say "UPS attached over USB HID" at every start).
 - **Read with `kIOHIDDeviceGetValueWithUpdate` (0x00020000).** The plain `IOHIDDeviceGetValue`
   returns the *cached* value for Input-type elements, and the ones the UPS does not push on its
   own (self-test result, beeper, the transfer voltages, rid 12/16/20) then read 0. The first probe

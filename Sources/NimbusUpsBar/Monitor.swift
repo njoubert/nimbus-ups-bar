@@ -133,8 +133,10 @@ final class UPSMonitor {
         live.onChange = { [weak self] in self?.changed() }
         volumes.onChange = { [weak self] in self?.volumesChanged() }
         power.onChange = { [weak self] in self?.poll(reason: "power source change") }
-        hid.onDeviceChange = { [weak self] attached in
-            self?.log.append(attached ? "UPS attached over USB HID" : "UPS detached from USB HID")
+        hid.onDeviceChange = { [weak self] attached, atStart in
+            // The UPS that was plugged in all along arrives too as the app starts; only a real
+            // plug or unplug is logged (Events showed an "attached" at every launch).
+            if !atStart { self?.log.append(attached ? "UPS attached over USB HID" : "UPS detached from USB HID") }
             self?.hidDue = 0
             self?.poll(reason: attached ? "UPS attached" : "UPS detached")
         }
