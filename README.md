@@ -46,16 +46,18 @@ green with a shield once the drives are safe, blue while remounting.
 
 | Stage | When | What happens |
 |---|---|---|
-| **On battery** | Transfer | A notification with charge and runtime. The Mac is held awake (the "UPS Power" power profile would sleep it after a minute). Nothing is touched: a flicker of under the grace period only produces this. |
+| **On battery** | Transfer | A notification with charge and runtime. The Mac is held awake (the "UPS Power" power profile would sleep it after a minute). Nothing is touched: a flicker of under the grace period only produces this. Power that comes back has to stay back for 30 s before the outage is over (the headline counts it down); under a brownout that transfers every few seconds the clock and the limits keep running, judged against the last reading on battery. |
 | **Closing apps** | Grace period over (default 2 min) | Every app with files open on a protected volume is sent a quit event, the same thing as its Quit menu, so it saves or shows its own unsaved-changes dialog. Daemons (`smbd`, Spotlight, Backblaze) are left alone. As soon as no app holds a volume, that volume is unmounted. |
-| **Unmounting** | Hard limit: default 5 min on battery, or charge at or below 50 %, or runtime at or below 10 min, or the UPS vanishing, or *Unmount Now* | Every protected volume is force-unmounted whether or not an app still holds it. Force only overrides dissenters and open files; the filesystem is flushed completely either way. |
+| **Unmounting** | Hard limit: default 5 min on battery, or charge at or below 50 %, or runtime at or below 10 min, or the UPS missing for 10 s (a USB re-enumeration drops it for a moment; that is not the battery dying), or *Unmount Now* | Every protected volume is force-unmounted whether or not an app still holds it. Force only overrides dissenters and open files; the filesystem is flushed completely either way. A volume that still refuses is retried every 10 s, and you are told once. |
 | **Drives safe** | Everything unmounted | The sleep hold is released. Optionally the Mac is put to sleep or shut down. |
 | **Remounting** | Power back | Whatever the guard unmounted is mounted again, if the disk is still attached. If the enclosure rebooted, macOS mounts it itself and the guard notices. |
 
 While an outage runs, the top of the menu offers **Unmount Now**, **Postpone 5 Minutes** (the
 charge and runtime limits still apply: postponing cannot talk the battery into lasting longer) and
 **Don't Quit Apps This Outage**. Readings in the first 15 s on battery are ignored, because some
-UPSes report 0 % for a moment at the transfer.
+UPSes report 0 % for a moment at the transfer. A relaunch mid-outage (a crash restart by the
+agent, an update, toggling *Run in Background*) carries the outage's clock on rather than
+starting the grace period again.
 
 **In the dropdown.** First the headline: the stage, what comes next and when, and three figures:
 charge, load in watts, runtime (the UPS's own estimate at the current load). Top right, how old
@@ -134,7 +136,8 @@ hosts it ever talks to.
 - `Sources/UpsGuardCore/` is the state machine with no AppKit and no IOKit: the readings, the
   policy, the phases, the rehearsal and drill wrappers, the simulated UPS. `swift test` drives it
   through 27 scenarios with a fake clock, fake volumes, fake holders and fake actions.
-- `Sources/NimbusUpsBar/PowerSources.swift` reads macOS's own power-source entries
+- `Sources/NimbusUpsBarKit/` is the platform layer, a library so its logic can be tested
+  without a UPS. `PowerSources.swift` reads macOS's own power-source entries
   (`IOPSCopyPowerSourcesInfo`, what `pmset -g ps` prints) and gets a run-loop notification the
   moment the UPS state changes.
 - `UPSHID.swift` reads the UPS over USB HID directly, which is where the load, the input, output and
@@ -145,9 +148,15 @@ hosts it ever talks to.
   by `diskN`.
 - `Holders.swift` finds the processes with files open on a volume with `proc_listpidspath` (what
   `lsof` uses), in about 60 ms, and asks an app to quit through `NSRunningApplication.terminate`,
-  a quit Apple event.
-- `Monitor.swift` ties it together on a 2 s timer (HID every 10 s on line power, every 2 s on
+  a quit Apple event, addressed to the owning app's bundle id so that a helper process (a browser
+  renderer) gets its parent asked. Executables under `/System` are never apps to it.
+- `Sources/NimbusUpsBar/Monitor.swift` ties it together on a 2 s timer (HID every 10 s on line power, every 2 s on
   battery), keeps the chart's samples, and runs simulations.
+- `swift test` runs 41 outage scenarios against a fake desk (flapping mains, a UPS that drops off
+  USB for a moment, a relaunch mid-outage, a volume that refuses to unmount, two volumes landing
+  at different times, …) and 45 checks of the platform layer against fixtures, among them a raw
+  dump of the CP1500's 58 HID elements, so the decode, the health rules and the volume filter are
+  checked in CI with no hardware attached.
 
 The command line has the same readers and the same guard with no UI:
 
@@ -158,6 +167,8 @@ The command line has the same readers and the same guard with no UI:
 .build/debug/NimbusUpsBar --simulate       a rehearsal in the terminal
 .build/debug/NimbusUpsBar --holders /Volumes/Flitslig
 .build/debug/NimbusUpsBar --volumes
+.build/debug/NimbusUpsBar --dump-hid-raw cp1500.json   every raw HID element value, as the decode's fixture
+.build/debug/NimbusUpsBar --after-safe sleep           the after-safe action, once, after a typed confirmation
 ```
 
 ## Platform facts it rests on
@@ -185,7 +196,9 @@ transfer seen within seconds; at 2 min 02 s Lightroom was asked to quit and let 
 second; Flitslig unmounted at 2 min 03 s; power back at 2 min 18 s and Flitslig remounted at once.
 
 The charge gauge went 100 % → 78 % after one minute → 72 % after two, while the runtime estimate
-stayed near an hour (66 → 50 → 57 min, following the load). The gauge is not an energy count: on
+stayed near an hour (66 → 50 → 57 min, following the load). (The guard has since learned to wait
+30 s of steady mains before standing down, so today the remount would have come at 2 min 48 s.)
+The gauge is not an energy count: on
 this UPS it follows the battery voltage, which sags 20–30 % worth in the first minute under load
 and then flattens, and climbs back only as the charger brings the voltage up over the following
 hours. A hard limit at 50 % therefore fires earlier than "half the energy" suggests, which is the
@@ -193,14 +206,38 @@ safe direction; the runtime estimate and the time on battery are the better guid
 the drives really have. To see where the gauge settles under your load, pull the plug once with
 nothing mounted and watch the chart for ten minutes.
 
-## Not yet verified
+## Before relying on it unattended
 
-- *Shut the Mac down* uses the shutdown Apple event to `loginwindow`, which needs no password.
-  Untested here; test it once at the keyboard before relying on it unattended.
-- A Mac that is already asleep when the outage starts does not run the guard. On line power this
-  desk never sleeps, so the gap is only a manual sleep.
-- Phase 2, email notifications for when the desk is unattended, is designed in
-  `docs/phase-2-email-notifications.md` and not built.
+The tests cover the decisions; these are the things only the desk can show. Each is a few minutes
+at the keyboard, with nothing important open on the drives.
+
+1. **Rehearse, then drill** (*Simulate an Outage*). The drill really unmounts and remounts.
+2. **Pull the plug** with the log open: transfer within seconds, the stages at the times the
+   policy says, the remount 30 s after power returns.
+3. **Pull the USB cable** 30 s into a plug-pull: the headline says "UPS not answering" and nothing
+   is unmounted; leave it out and after 10 s everything is, as if the battery had died.
+4. **Flap it**: plug the wall lead back in for 10 s during a plug-pull, then pull it again. One
+   "Power outage" notification, no "Power restored", the clock keeps counting.
+5. **A browser holding a file on the drive** during a drill (a download in progress, a file open
+   from it): the browser itself is asked to quit, not one of its helper processes.
+6. ***Unmount Now*** from the menu during a drill.
+7. **The after-safe action.** `--after-safe sleep` and `--after-safe shutdown` from a terminal,
+   each once: both ask for a typed confirmation. For shutdown, watch whether macOS puts up an
+   Automation prompt for `loginwindow` the first time; if it does, approve it, because unattended
+   that prompt would be a silent no-op. Neither has been run on this desk yet.
+8. **The agent.** After `./build.sh install`: `kill -9` the running copy and see it back within
+   10 s; toggle *Run in Background* off and on, with `pgrep -x NimbusUpsBar` showing one pid each
+   time; `./build.sh run` while the agent is enabled (it quits the agent copy cleanly, and the
+   dev copy stays).
+9. **Launch during an outage** (`./build.sh run` with the plug pulled): the clock resumes from the
+   previous copy's start.
+10. **The SMB client side** during a forced unmount, and a ten-minute plug-pull with nothing
+    mounted to see where the charge gauge settles.
+
+Not covered by anything: a Mac that is already asleep when the outage starts does not run the
+guard (on line power this desk never sleeps, so the gap is only a manual sleep), and phase 2,
+email notifications for when the desk is unattended, is designed in
+`docs/phase-2-email-notifications.md` and not built.
 
 ## Licence
 
