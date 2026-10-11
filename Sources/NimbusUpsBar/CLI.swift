@@ -23,6 +23,7 @@ enum CLI {
         case printMenu
         case dumpHIDRaw(path: String)
         case afterSafe(action: String)
+        case dumpSettings(dir: String)
     }
 
     static func run(_ cmd: Command) -> Int32 {
@@ -68,6 +69,50 @@ enum CLI {
             Log.shared.append("--after-safe \(word): performing it at the owner's request from the terminal")
             if what == .sleep { PowerActions.sleep() } else { PowerActions.shutDown() }
             spin(2.0)
+            return 0
+
+        case .dumpSettings(let dir):
+            // Each pane of the Settings window as a PNG, against the real volumes: the layout
+            // check for a window nobody can screenshot from a terminal.
+            let m = UPSMonitor()
+            m.poll(reason: nil)
+            spin(1.0)
+            NSApplication.shared.appearance = NSAppearance(named: .darkAqua)
+            let wc = SettingsWindowController(monitor: m, updater: nil)
+            // The real window, on screen for a few seconds, one capture per tab: the toolbar,
+            // the title and the resize between tabs are only visible this way.
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            NSApp.setActivationPolicy(.accessory)
+            wc.show()
+            spin(0.5)
+            for (i, item) in wc.tabs.tabViewItems.enumerated() {
+                wc.tabs.selectedTabViewItemIndex = i
+                spin(0.6)
+                guard let w = wc.window, let frame = w.contentView?.superview,
+                      let rep = frame.bitmapImageRepForCachingDisplay(in: frame.bounds) else { continue }
+                frame.cacheDisplay(in: frame.bounds, to: rep)
+                let path = "\(dir)/window-\(i)-\(item.label.lowercased()).png"
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+                Swift.print("wrote \(path) (window \(Int(w.frame.width))×\(Int(w.frame.height)), title “\(w.title)”)")
+            }
+            wc.close()
+            // Then each pane on its own, out of the window (this moves the views out of the tab
+            // view, so it comes last).
+            for (i, item) in wc.tabs.tabViewItems.enumerated() {
+                guard let pane = item.viewController?.view else { continue }
+                // Out of a window the view has no backdrop, so the labels would be white on nothing.
+                let v = Backdrop(frame: .zero)
+                v.addSubview(pane)
+                pane.layoutSubtreeIfNeeded()
+                v.setFrameSize(pane.fittingSize)
+                pane.frame = v.bounds
+                pane.layoutSubtreeIfNeeded()
+                guard let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { continue }
+                v.cacheDisplay(in: v.bounds, to: rep)
+                let path = "\(dir)/\(i)-\(item.label.lowercased()).png"
+                do { try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path)); Swift.print("wrote \(path) (\(Int(v.bounds.width))×\(Int(v.bounds.height)))") }
+                catch { Swift.print("\(path): \(error)") }
+            }
             return 0
 
         case .printMenu:
@@ -194,6 +239,11 @@ enum CLI {
     }
 
     // MARK: Report
+
+    /// A window-coloured backdrop for `--dump-settings`.
+    private final class Backdrop: NSView {
+        override func draw(_ dirtyRect: NSRect) { NSColor.windowBackgroundColor.setFill(); bounds.fill() }
+    }
 
     private static func printReport(_ m: UPSMonitor) {
         let r = m.reading

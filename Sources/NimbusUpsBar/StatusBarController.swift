@@ -29,6 +29,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private var simulationStatusItem: NSMenuItem?
     private var versionItem: NSMenuItem?
     private var lastBar: (symbol: String, title: String, color: String)?
+    private var settingsObserver: NSObjectProtocol?
 
     init(monitor: UPSMonitor, updater: Updater? = nil, headless: Bool = false) {
         self.monitor = monitor
@@ -39,12 +40,26 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         menu.autoenablesItems = false
         item?.menu = menu
         headline.model = { [weak self] in self?.headlineModel() ?? HeadlineView.Model(title: "", color: .clear, subtitle: "") }
-        headline.toolTip = "Charge, load and voltages come from a USB read of the UPS: every 10 s on line power, every 2 s on battery and while this menu is open. "
-            + "The line/battery state also arrives from macOS the moment it changes. The top-right figure is the age of what you see."
         chart.samples = { [weak self] in self?.monitor.samples ?? [] }
         monitor.onChange = { [weak self] in self?.monitorChanged() }
         Log.shared.onAppend = { [weak self] in self?.logChanged() }
+        settingsObserver = NotificationCenter.default.addObserver(forName: Settings.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.settingsChanged() }
+        }
+        settingsChanged()
+    }
+
+    /// A setting changed somewhere (the Settings window, mostly): the bar's extra, the chart's
+    /// span and the cadence in the tooltip follow at once.
+    private func settingsChanged() {
+        let s = Settings.shared
+        chart.span = s.historyWindow
+        chart.sampleGap = s.lineReadInterval * 3
+        headline.toolTip = "Charge, load and voltages come from a USB read of the UPS: every \(Int(s.lineReadInterval)) s on line power, every \(Int(s.busyReadInterval)) s on battery and while this menu is open (Settings › Readings). "
+            + "The line/battery state also arrives from macOS the moment it changes. The top-right figure is the age of what you see."
+        lastBar = nil
         updateBar()
+        if menuOpen { refreshLiveRows() }
     }
 
     private func monitorChanged() {
@@ -183,12 +198,12 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             color = .systemOrange
             if let soft = st.untilSoft {
                 subtitle = (st.quitAppsThisOutage ? "Apps asked to quit in \(Duration.countdown(soft))" : "Free volumes unmount in \(Duration.countdown(soft))")
-                if let hard = st.untilHard { subtitle += " · forced by \(Duration.countdown(hard))" }
+                if let hard = st.untilForce { subtitle += " · forced by \(Duration.countdown(hard))" }
             }
         case .soft:
             color = .systemOrange
             subtitle = st.waitingFor.isEmpty ? "Unmounting volumes no app is using" : "Waiting for \(st.waitingFor.joined(separator: ", "))"
-            if let hard = st.untilHard { subtitle += " · forced in \(Duration.countdown(hard))" }
+            if let hard = st.untilForce { subtitle += " · forced in \(Duration.countdown(hard))" }
         case .hard:
             color = .systemRed
             subtitle = st.hardReasons.first.map { "Hard limit: \($0)" } ?? "Force-unmounting every protected volume"
@@ -289,15 +304,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         let sim = NSMenuItem(title: "Simulate an Outage", action: nil, keyEquivalent: "")
         sim.submenu = simulationMenu()
         menu.addItem(sim)
-        let policy = NSMenuItem(title: "Outage Policy", action: nil, keyEquivalent: "")
-        policy.submenu = policyMenu()
-        menu.addItem(policy)
-        let protect = NSMenuItem(title: "Volumes to Protect", action: nil, keyEquivalent: "")
-        protect.submenu = volumesToProtectMenu()
-        menu.addItem(protect)
         let events = NSMenuItem(title: "Recent Events", action: nil, keyEquivalent: "")
         events.submenu = eventsMenu()
         menu.addItem(events)
+        let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        settings.target = self
+        settings.toolTip = "Policy: " + monitor.policyText
+        menu.addItem(settings)
         menu.addItem(.separator())
 
         let agent = NSMenuItem(title: "Run in Background at Login", action: #selector(toggleAgent(_:)), keyEquivalent: "")
@@ -313,14 +326,6 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             agent.toolTip = "A launchd agent starts the app at login and restarts it if it crashes. Quit stays quit."
         }
         menu.addItem(agent)
-        let notif = NSMenuItem(title: "Notifications", action: #selector(toggleNotifications(_:)), keyEquivalent: "")
-        notif.target = self
-        notif.state = Settings.shared.notificationsEnabled ? .on : .off
-        menu.addItem(notif)
-        let load = NSMenuItem(title: "Show Load in Menu Bar", action: #selector(toggleShowLoad(_:)), keyEquivalent: "")
-        load.target = self
-        load.state = Settings.shared.showLoadInBar ? .on : .off
-        menu.addItem(load)
         addUpdateItems()
         menu.addItem(.separator())
 
@@ -343,8 +348,8 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         let now = action("Unmount Now", #selector(unmountNow))
         now.toolTip = "Go straight to the hard limit: every protected volume is force-unmounted."
         menu.addItem(now); actionItems["unmount"] = now
-        let post = action("Postpone 5 Minutes", #selector(postpone))
-        post.toolTip = "Push the soft stage and the time limit out by five minutes. The charge and runtime limits still apply."
+        let post = action("Postpone \(Duration.text(Settings.shared.postponeSeconds))", #selector(postpone))
+        post.toolTip = "Push the soft stage and the time limit out by \(Duration.text(Settings.shared.postponeSeconds)) (Settings › General). The charge and runtime limits still apply."
         menu.addItem(post); actionItems["postpone"] = post
         let skip = action("Don't Quit Apps This Outage", #selector(skipQuitting))
         skip.toolTip = "Leave the apps alone; volumes unmount only at the hard limit or when their apps let go."
@@ -361,7 +366,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         let mounted = st.volumes.contains { $0.volume.isMounted }
         actionItems["unmount"]?.isEnabled = st.phase.isOutage && st.phase != .safe && mounted
         actionItems["postpone"]?.isEnabled = st.phase == .holding || st.phase == .soft
-        if st.postponedBy > 0 { actionItems["postpone"]?.title = "Postpone 5 More Minutes (postponed \(Duration.text(st.postponedBy)))" }
+        if st.postponedBy > 0 { actionItems["postpone"]?.title = "Postpone \(Duration.text(Settings.shared.postponeSeconds)) More (postponed \(Duration.text(st.postponedBy)))" }
         actionItems["skip"]?.isEnabled = (st.phase == .holding || st.phase == .soft) && st.quitAppsThisOutage
         actionItems["skip"]?.title = st.quitAppsThisOutage ? "Don't Quit Apps This Outage" : "Apps Will Not Be Quit This Outage"
         actionItems["remount"]?.isEnabled = !st.phase.isOutage && st.volumes.contains { $0.unmountedByGuard && $0.volume.isAttached && !$0.volume.isMounted }
@@ -542,82 +547,6 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         return m
     }
 
-    private func policyMenu() -> NSMenu {
-        let p = Settings.shared.policy
-        let m = NSMenu()
-        func choice(_ title: String, current: Double, choices: [Double], text: (Double) -> String, sel: Selector) {
-            let it = NSMenuItem(title: "\(title): \(text(current))", action: nil, keyEquivalent: "")
-            let sub = NSMenu()
-            for c in (choices + [current]).uniqued().sorted() {
-                let ci = NSMenuItem(title: text(c), action: sel, keyEquivalent: "")
-                ci.target = self
-                ci.representedObject = c
-                ci.state = c == current ? .on : .off
-                sub.addItem(ci)
-            }
-            it.submenu = sub
-            m.addItem(it)
-        }
-        choice("Wait Before Acting", current: p.graceSeconds, choices: Settings.graceChoices, text: { Duration.text($0) }, sel: #selector(setGrace(_:)))
-        choice("Unmount Regardless After", current: p.hardAfterSeconds, choices: Settings.hardAfterChoices, text: { Duration.text($0) }, sel: #selector(setHardAfter(_:)))
-        choice("…or When Charge Is At or Below", current: Double(p.hardAtPercent), choices: Settings.hardAtPercentChoices.map(Double.init), text: { "\(Int($0)) %" }, sel: #selector(setHardAtPercent(_:)))
-        choice("…or When Runtime Is At or Below", current: Double(p.hardAtRuntimeSeconds), choices: Settings.hardAtRuntimeChoices.map(Double.init), text: { Duration.text($0) }, sel: #selector(setHardAtRuntime(_:)))
-        m.addItem(.separator())
-        let quit = NSMenuItem(title: "Ask Apps to Quit First", action: #selector(toggleQuitApps(_:)), keyEquivalent: "")
-        quit.target = self
-        quit.state = p.quitApps ? .on : .off
-        quit.toolTip = "After the wait, apps with files open on a protected volume get a quit event, as from their Quit menu. Off: apps are never asked and volumes wait for the hard limit."
-        m.addItem(quit)
-        let never = Settings.shared.policy.neverQuit.subtracting(Policy.alwaysKept)
-        m.addItem(disabled("Never quit: Finder" + (never.isEmpty ? "" : ", " + never.sorted().joined(separator: ", "))))
-        m.addItem(.separator())
-        let after = NSMenuItem(title: "After the Volumes Are Safe: \(p.afterSafe.title)", action: nil, keyEquivalent: "")
-        let sub = NSMenu()
-        for a in Policy.AfterSafe.allCases {
-            let ai = NSMenuItem(title: a.title, action: #selector(setAfterSafe(_:)), keyEquivalent: "")
-            ai.target = self
-            ai.representedObject = a.rawValue
-            ai.state = a == p.afterSafe ? .on : .off
-            if a == .shutDown { ai.toolTip = "Through the shutdown event to loginwindow, no password needed. Untested on this desk; test it once while you are at the keyboard." }
-            sub.addItem(ai)
-        }
-        after.submenu = sub
-        m.addItem(after)
-        m.addItem(.separator())
-        m.addItem(disabled("Readings are ignored for the first \(Int(p.ignoreReadingsSeconds)) s on battery."))
-        return m
-    }
-
-    private func volumesToProtectMenu() -> NSMenu {
-        let m = NSMenu()
-        let mode = Settings.shared.volumeMode
-        let all = NSMenuItem(title: "All External Volumes", action: #selector(setModeAll), keyEquivalent: "")
-        all.target = self; all.state = mode == .allExternal ? .on : .off
-        m.addItem(all)
-        let sel = NSMenuItem(title: "Only the Volumes Checked Below", action: #selector(setModeSelected), keyEquivalent: "")
-        sel.target = self; sel.state = mode == .selected ? .on : .off
-        m.addItem(sel)
-        m.addItem(.separator())
-        var known = monitor.volumes.volumes
-        for v in Settings.shared.knownVolumes where known[v.uuid] == nil { known[v.uuid] = v }
-        let list = known.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        if list.isEmpty { m.addItem(disabled("No external volumes seen yet")) }
-        for v in list {
-            let it = NSMenuItem(title: v.name + (v.isAttached ? "" : "  (not attached)"), action: #selector(toggleVolume(_:)), keyEquivalent: "")
-            it.target = self
-            it.representedObject = v.uuid
-            it.state = Settings.shared.selectedVolumeUUIDs.contains(v.uuid) ? .on : .off
-            it.isEnabled = mode == .selected
-            it.toolTip = v.detail + "\n" + v.uuid
-            m.addItem(it)
-        }
-        if list.contains(where: { !$0.isAttached }) {
-            m.addItem(.separator())
-            m.addItem(action("Forget Volumes That Are Not Attached", #selector(forgetDetached)))
-        }
-        return m
-    }
-
     private func eventsMenu() -> NSMenu {
         let m = NSMenu()
         let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
@@ -695,7 +624,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     // MARK: Actions
 
     @objc private func unmountNow() { monitor.unmountNow() }
-    @objc private func postpone() { monitor.postpone(seconds: 300) }
+    @objc private func postpone() { monitor.postpone(seconds: Settings.shared.postponeSeconds) }
     @objc private func skipQuitting() { monitor.skipQuittingApps() }
     @objc private func remountNow() { monitor.remountNow() }
 
@@ -760,44 +689,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     @objc private func endSimulation() { monitor.endSimulation() }
 
-    @objc private func setGrace(_ s: NSMenuItem) { var p = Settings.shared.policy; p.graceSeconds = s.representedObject as? Double ?? p.graceSeconds; Settings.shared.policy = p }
-    @objc private func setHardAfter(_ s: NSMenuItem) { var p = Settings.shared.policy; p.hardAfterSeconds = s.representedObject as? Double ?? p.hardAfterSeconds; Settings.shared.policy = p }
-    @objc private func setHardAtPercent(_ s: NSMenuItem) { var p = Settings.shared.policy; p.hardAtPercent = Int(s.representedObject as? Double ?? Double(p.hardAtPercent)); Settings.shared.policy = p }
-    @objc private func setHardAtRuntime(_ s: NSMenuItem) { var p = Settings.shared.policy; p.hardAtRuntimeSeconds = Int(s.representedObject as? Double ?? Double(p.hardAtRuntimeSeconds)); Settings.shared.policy = p }
-    @objc private func toggleQuitApps(_ s: NSMenuItem) { var p = Settings.shared.policy; p.quitApps.toggle(); Settings.shared.policy = p }
-    @objc private func setAfterSafe(_ s: NSMenuItem) {
-        var p = Settings.shared.policy
-        p.afterSafe = Policy.AfterSafe(rawValue: s.representedObject as? String ?? "") ?? p.afterSafe
-        Settings.shared.policy = p
-    }
-    @objc private func setModeAll() { Settings.shared.volumeMode = .allExternal }
-    @objc private func setModeSelected() { Settings.shared.volumeMode = .selected }
-    @objc private func toggleVolume(_ s: NSMenuItem) {
-        guard let uuid = s.representedObject as? String else { return }
-        var set = Settings.shared.selectedVolumeUUIDs
-        if set.contains(uuid) { set.remove(uuid) } else { set.insert(uuid) }
-        Settings.shared.selectedVolumeUUIDs = set
-    }
-    @objc private func forgetDetached() {
-        for v in Settings.shared.knownVolumes where monitor.volumes.volumes[v.uuid]?.isAttached != true { Settings.shared.forget(v.uuid) }
-    }
+    @objc private func openSettings() { AppDelegate.shared?.showSettings() }
     @objc private func openLog() { NSWorkspace.shared.open(Log.fileURL) }
 
     @objc private func toggleAgent(_ sender: NSMenuItem) {
         let turnOn = !BackgroundAgent.isEnabled
         UserDefaults.standard.set(true, forKey: BackgroundAgent.registeredDefaultsKey)
         AppDelegate.shared?.setAgent(enabled: turnOn)
-    }
-
-    @objc private func toggleNotifications(_ sender: NSMenuItem) {
-        Settings.shared.notificationsEnabled.toggle()
-        if Settings.shared.notificationsEnabled { Notifications.shared.requestAuthorizationIfNeeded() }
-    }
-
-    @objc private func toggleShowLoad(_ sender: NSMenuItem) {
-        Settings.shared.showLoadInBar.toggle()
-        lastBar = nil
-        updateBar()
     }
 
     @objc private func copyValue(_ sender: NSMenuItem) {

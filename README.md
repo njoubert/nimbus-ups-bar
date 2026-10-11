@@ -38,7 +38,7 @@ is in a handoff folder the owner keeps outside the repository.
 
 **In the bar.** A bolt on line power, coloured by the health check: green when the UPS is ready,
 yellow when something wants a look, red with a warning badge for a fault, a red struck-out bolt
-when no UPS is connected (add the load in watts with *Show Load in Menu Bar*). During an outage
+when no UPS is connected (add the load in watts in Settings › Readings). During an outage
 the icon turns orange with the UPS charge and a countdown to the next step, red while forcing,
 green with a shield once the drives are safe, blue while remounting.
 
@@ -47,24 +47,25 @@ green with a shield once the drives are safe, blue while remounting.
 | Stage | When | What happens |
 |---|---|---|
 | **On battery** | Transfer | A notification with charge and runtime. The Mac is held awake (the "UPS Power" power profile would sleep it after a minute). Nothing is touched: a flicker of under the grace period only produces this. Power that comes back has to stay back for 30 s before the outage is over (the headline counts it down); under a brownout that transfers every few seconds the clock and the limits keep running, judged against the last reading on battery. |
-| **Closing apps** | Grace period over (default 2 min) | Every app with files open on a protected volume is sent a quit event, the same thing as its Quit menu, so it saves or shows its own unsaved-changes dialog. Daemons (`smbd`, Spotlight, Backblaze) are left alone. As soon as no app holds a volume, that volume is unmounted. |
-| **Unmounting** | Hard limit: default 5 min on battery, or charge at or below 50 %, or runtime at or below 10 min, or the UPS missing for 10 s (a USB re-enumeration drops it for a moment; that is not the battery dying), or *Unmount Now* | Every protected volume is force-unmounted whether or not an app still holds it. Force only overrides dissenters and open files; the filesystem is flushed completely either way. A volume that still refuses is retried every 10 s, and you are told once. |
+| **Closing apps** | Grace period over (default 2 min) | Every app with files open on a protected volume is sent a quit event, the same thing as its Quit menu, so it saves or shows its own unsaved-changes dialog. Daemons (`smbd`, Spotlight, Backblaze) are left alone. As soon as no app holds a volume, that volume is unmounted. With a quit timeout set (off by default), an app still holding its volume that long after the ask has the volume unmounted anyway. |
+| **Unmounting** | Hard limit: default 5 min on battery (always on), or charge at or below 50 %, or runtime at or below 10 min (either can be turned off), or the UPS missing for 10 s (a USB re-enumeration drops it for a moment; that is not the battery dying), or *Unmount Now* | Every protected volume is force-unmounted whether or not an app still holds it. Force only overrides dissenters and open files; the filesystem is flushed completely either way. A volume that still refuses is retried every 10 s, and you are told once. |
 | **Drives safe** | Everything unmounted | The sleep hold is released. Optionally the Mac is put to sleep or shut down. |
 | **Remounting** | Power back | Whatever the guard unmounted is mounted again, if the disk is still attached. If the enclosure rebooted, macOS mounts it itself and the guard notices. |
 
-While an outage runs, the top of the menu offers **Unmount Now**, **Postpone 5 Minutes** (the
-charge and runtime limits still apply: postponing cannot talk the battery into lasting longer) and
-**Don't Quit Apps This Outage**. Readings in the first 15 s on battery are ignored, because some
-UPSes report 0 % for a moment at the transfer. A relaunch mid-outage (a crash restart by the
+While an outage runs, the top of the menu offers **Unmount Now**, **Postpone** (5 min by default;
+the charge and runtime limits still apply: postponing cannot talk the battery into lasting longer)
+and **Don't Quit Apps This Outage**. Readings in the first 15 s on battery are ignored, because
+some UPSes report 0 % for a moment at the transfer. A relaunch mid-outage (a crash restart by the
 agent, an update, toggling *Run in Background*) carries the outage's clock on rather than
 starting the grace period again.
 
 **In the dropdown.** First the headline: the stage, what comes next and when, and three figures:
 charge, load in watts, runtime (the UPS's own estimate at the current load). Top right, how old
 those figures are and how often they are read: every 10 s on line power, every 2 s on battery and
-while the menu is open (the line/battery state itself arrives from macOS the moment it changes). Then a chart of the
-**last hour** in two panels on one time axis, load above and battery charge below, with minutes on
-battery tinted; hover for the values at any moment. Then:
+while the menu is open, both adjustable (the line/battery state itself arrives from macOS the
+moment it changes). Then a chart of the **last hour** (up to a day, in Settings) in two panels on
+one time axis, load above and battery charge below, with minutes on battery tinted; hover for the
+values at any moment. Then:
 
 - **Protected Volumes**: every external volume, with a dot (green mounted, yellow unmounted or
   being worked on, red detached) and who has files open on it. Each has a submenu with *Unmount
@@ -77,15 +78,29 @@ battery tinted; hover for the values at any moment. Then:
   and the real apps holding them; it logs what it would do and touches nothing) and a **drill** (the
   same pretend outage at 5× with real quits, real unmounts and real remounts; it never sleeps or
   shuts down the Mac, and a real outage abandons it).
-- **Outage Policy**: the grace period, the three hard limits, whether apps are asked to quit, and
-  what to do once the drives are safe (keep running, sleep, shut down).
-- **Volumes to Protect**: all external volumes (the default), or only the ones you check. Disk
-  images and the EFI and boot helper partitions never count as external.
 - **Recent Events** and *Open Log File*: every decision, reading and action, timestamped, in
   `~/Library/Logs/Nimbus UPS Bar/ups-bar.log` (also in the unified log under
   `com.njoubert.nimbusupsbar`).
-- **Run in Background at Login**, **Notifications**, **Show Load in Menu Bar**, the update items,
-  the version, Quit.
+- **Settings…** (⌘,): the window described next.
+- **Run in Background at Login**, the update items, the version, Quit.
+
+**Settings.** Four panes; every change applies at once.
+
+- **Outage**: the policy. The wait before anything happens; whether apps are asked to quit and,
+  optionally, how long they get before their volume is unmounted anyway; the time limit (always
+  on) and the charge and runtime limits (each can be turned off; the charge gauge on this UPS is
+  voltage-derived, see below); how long readings are ignored after the transfer; how long power
+  must stay back before the outage is over; what to do once the drives are safe (keep running,
+  sleep, shut down); and the apps never asked to quit, picked from the running apps or typed as a
+  bundle id or name. Durations are typed as written everywhere else: `90 s`, `2 min`, `1 h 30 min`.
+- **Volumes**: all external volumes (the default), or only the ones you check. Volumes seen before
+  but not attached now stay in the list. Disk images and the EFI and boot helper partitions never
+  count as external.
+- **Readings**: how often the UPS is read on line power (10 s) and on battery, in a simulation and
+  with the menu open (2 s; also the guard's clock); how much history the chart shows (30 min to
+  24 h); the load in the menu bar.
+- **General**: run in the background at login, notifications, automatic update checks, what
+  *Postpone* adds, the log.
 
 **Health.** The health row and the headline name the first thing that is wrong, not just that
 something is. Red: no UPS on USB, the replace-battery flag, an overload, a failed self-test,
@@ -117,11 +132,12 @@ hosts it ever talks to.
    should be green, and the load should be the watts your desk draws. A load of 0 % means the
    things you care about are plugged into the UPS's surge-only outlets, which the battery does not
    back.
-3. **Choose the volumes.** *All External Volumes* is right for a desk where everything external is
-   on the UPS. Otherwise check the ones that are.
-4. **Set the policy.** The defaults (2 min grace, 5 min / 50 % / 10 min hard limits, ask apps to
-   quit, keep running afterwards) suit a UPS with an hour or more of runtime. With a heavy load and
-   a short runtime, shorten the grace period.
+3. **Choose the volumes** (Settings › Volumes). *All external volumes* is right for a desk where
+   everything external is on the UPS. Otherwise check the ones that are.
+4. **Set the policy** (Settings › Outage). The defaults (2 min grace, 5 min / 50 % / 10 min hard
+   limits, ask apps to quit with no timeout, keep running afterwards) suit a UPS with an hour or
+   more of runtime. With a heavy load and a short runtime, shorten the grace period; if an app
+   that hangs on Quit worries you more than losing its unsaved work, give the apps a timeout.
 5. **Rehearse.** *Simulate an Outage › Rehearse*: watch the menu and the log walk through the
    stages in about half a minute without touching anything.
 6. **Drill**, with your work saved: the same with real unmounts. The volumes come back by
@@ -150,9 +166,9 @@ hosts it ever talks to.
   `lsof` uses), in about 60 ms, and asks an app to quit through `NSRunningApplication.terminate`,
   a quit Apple event, addressed to the owning app's bundle id so that a helper process (a browser
   renderer) gets its parent asked. Executables under `/System` are never apps to it.
-- `Sources/NimbusUpsBar/Monitor.swift` ties it together on a 2 s timer (HID every 10 s on line power, every 2 s on
-  battery), keeps the chart's samples, and runs simulations.
-- `swift test` runs 41 outage scenarios against a fake desk (flapping mains, a UPS that drops off
+- `Sources/NimbusUpsBar/Monitor.swift` ties it together on a timer (HID every 10 s on line power,
+  every 2 s on battery; both from Settings), keeps the chart's samples, and runs simulations.
+- `swift test` runs 47 outage scenarios against a fake desk (flapping mains, a UPS that drops off
   USB for a moment, a relaunch mid-outage, a volume that refuses to unmount, two volumes landing
   at different times, …) and 45 checks of the platform layer against fixtures, among them a raw
   dump of the CP1500's 58 HID elements, so the decode, the health rules and the volume filter are

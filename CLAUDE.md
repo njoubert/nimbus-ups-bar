@@ -75,7 +75,11 @@ Sources/NimbusUpsBar/        the app
   Monitor.swift              UPSMonitor: timers, the merge, samples for the chart, simulations,
                              outage persistence, the arming delay; RealEnvironment (the live
                              GuardEnvironment)
-  Settings.swift             UserDefaults: policy, volume mode and selection, known volumes
+  Settings.swift             UserDefaults: policy (the optional limits as value + on/off flag),
+                             read intervals, chart span, volume mode and selection, known volumes;
+                             every setter posts Settings.didChange
+  SettingsWindow.swift       the Settings window: NSTabViewController with toolbar tabs, the four
+                             panes, Form/Controls helpers, DurationFormatter, the main menu
   Log.swift                  the log file, the ring for Recent Events, os_log
   Notifications.swift        UNUserNotificationCenter (bundle only)
   BackgroundAgent.swift      SMAppService.agent + the plist text build.sh bakes in
@@ -84,7 +88,7 @@ Sources/NimbusUpsBar/        the app
   HeadlineView.swift         the phase + three figures at the top of the menu
   ChartView.swift            load and charge, two panels, one hour, hover readout, outage bands
   AppIcon.swift, DMGBackground.swift, Updates.swift   as in the siblings
-Tests/UpsGuardCoreTests/     41 scenarios against FakeEnvironment
+Tests/UpsGuardCoreTests/     47 scenarios against FakeEnvironment
 Tests/NimbusUpsBarKitTests/  45 checks: the HID decode against Fixtures/cp1500pfclcda.json and
                              hand-made maps, every health rule, the DA dictionary filter, the
                              holder resolver, the merge
@@ -104,13 +108,15 @@ main.
 
 ```
 ./build.sh run [--fg]         debug build as dist/debug/Nimbus UPS Bar.app (quits any running copy first)
-./build.sh test               swift test: the 41 guard scenarios and the 45 platform checks
+./build.sh test               swift test: the 47 guard scenarios and the 45 platform checks
 ./build.sh install            release → /Applications, register the agent (owner's call), launch
 .build/debug/NimbusUpsBar --print        the UPS, health, every HID field, volumes, holders, policy
 .build/debug/NimbusUpsBar --print-menu   the menu built against the real UPS, as an indented tree
 .build/debug/NimbusUpsBar --watch        readings + the guard's log as they happen (Ctrl-C)
 .build/debug/NimbusUpsBar --simulate     a rehearsal in the terminal (~30 s; touches nothing)
 .build/debug/NimbusUpsBar --dump-chart P the chart with fake data → PNG (dark appearance)
+.build/debug/NimbusUpsBar --dump-settings D   each Settings pane → D/N-name.png, then the real window
+                                         on screen for ~3 s → D/window-N-name.png (the layout check)
 .build/debug/NimbusUpsBar --dump-hid-raw P   every raw HID element value as JSON: the decode fixture
 .build/debug/NimbusUpsBar --after-safe sleep|shutdown   the after-safe action once, at a TTY, after typing it
 ```
@@ -129,9 +135,11 @@ behaviour through the bundle `build.sh run` makes.
 
 Phases from the first reading on battery: `holding` (grace, default 120 s, nothing touched) →
 `soft` (apps holding files are sent one quit each; a volume unmounts as soon as no app outside
-the never-quit list holds it; once begun the stage stays begun, a postponement only moves the
-hard limit) → `hard` (time ≥ 300 s, charge ≤ 50 %, runtime ≤ 10 min, the UPS missing for 10 s,
-shutdown-imminent, or *Unmount Now*: force-unmount everything) → `safe` (sleep hold released;
+the never-quit list holds it, or, with `quitTimeoutSeconds` set, once every app holding it was
+asked that long ago; once begun the stage stays begun, a postponement only moves the hard limit)
+→ `hard` (time ≥ 300 s, charge ≤ 50 %, runtime ≤ 10 min, the UPS missing for 10 s,
+shutdown-imminent, or *Unmount Now*: force-unmount everything; the charge and runtime limits are
+optional, the time limit is not) → `safe` (sleep hold released;
 the after-safe action once, only after the grace period, and never while mains is back but not
 yet trusted) → on line power `restoring` (remount what *we* unmounted, retrying every 30 s while
 the disk is attached; a macOS auto-remount counts). Readings are ignored for the first 15 s on
@@ -224,6 +232,16 @@ the end, so `safe` is reached the moment the last volume lands rather than two s
   that takes over; disabling spawns `open -n` of the bundle first, then unregisters (launchd stops
   the agent's job). `--dump-bar` skips the rule so it can grab the bar beside the live copy.
 - **`UNUserNotificationCenter` needs a bundle**; the bare binary logs instead (`Notifications.available`).
+- **The Settings window is an `NSTabViewController` with `tabStyle = .toolbar`** in an
+  `NSWindow(contentViewController:)`. Traps found 2026-10-10: the window's title follows the
+  selected child's `title` (nil shows "Untitled"), so every pane sets one; the window takes its
+  initial size from the tab view's placeholder, not the first pane, so the controller sets the
+  content size from the first pane's `preferredContentSize` (each pane sets it from
+  `view.fittingSize` in `viewDidLoad`); an `NSButton` checkbox with `lineBreakMode =
+  .byWordWrapping` collapses to a few words wide in a grid cell. Key equivalents (⌘, ⌘W ⌘C ⌘V)
+  come from `NSApp.mainMenu`, which an LSUIElement app has to build itself (`MainMenu.install()`).
+  Form fields hold a `DurationFormatter`; a string `Duration.parse` rejects keeps the focus and
+  shows the reason under the form.
 - **`leaks` reports ~400 leaked objects** (~20 KB) in three `NSXPCConnection` retain cycles
   (`LNDaemonApplicationInterface`, notifications / LaunchServices) right after launch. Framework
   internals, not ours; check that the count stays flat before chasing it.

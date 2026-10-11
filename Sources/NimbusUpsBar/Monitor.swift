@@ -40,11 +40,6 @@ final class UPSMonitor {
         }
     }
 
-    static let sampleInterval: TimeInterval = 10
-    static let historyWindow: TimeInterval = 60 * 60
-    static let tickInterval: TimeInterval = 2
-    static let hidFreshFor: TimeInterval = 15
-
     let settings = Settings.shared
     let log = Log.shared
     let power = PowerSources()
@@ -112,6 +107,7 @@ final class UPSMonitor {
             guard let self else { return }
             self.live.policy = self.settings.policy
             self.simulation?.guardian.policy = self.settings.policy
+            if self.timer != nil, self.timer?.timeInterval != self.settings.busyReadInterval { self.startTimer() }
             self.onChange?()
         }
         let ws = NSWorkspace.shared.notificationCenter
@@ -134,13 +130,19 @@ final class UPSMonitor {
             }
         }
         power.start()
-        let t = Timer(timeInterval: UPSMonitor.tickInterval, repeats: true) { [weak self] _ in
+        startTimer()
+        poll(reason: "start")
+    }
+
+    /// The tick: the guard's clock, and the read cadence when busy. Rebuilt when that setting changes.
+    private func startTimer() {
+        timer?.invalidate()
+        let t = Timer(timeInterval: settings.busyReadInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.poll(reason: nil) }
         }
-        t.tolerance = 0.5
+        t.tolerance = min(0.5, settings.busyReadInterval / 4)
         RunLoop.main.add(t, forMode: .common)
         timer = t
-        poll(reason: "start")
     }
 
     func stop() {
@@ -151,10 +153,14 @@ final class UPSMonitor {
     }
 
     var policyText: String {
-        let p = settings.policy
-        return "grace \(Duration.text(p.graceSeconds)), hard after \(Duration.text(p.hardAfterSeconds)) or \(p.hardAtPercent) % or \(Duration.text(TimeInterval(p.hardAtRuntimeSeconds))) left, "
-            + "\(p.quitApps ? "ask apps to quit" : "never quit apps"), then \(p.afterSafe.title.lowercased()); "
-            + "volumes: \(settings.volumeMode == .allExternal ? "all external" : "\(settings.selectedVolumeUUIDs.count) selected")"
+        settings.policy.summary + "; volumes: \(settings.volumeMode == .allExternal ? "all external" : "\(settings.selectedVolumeUUIDs.count) selected")"
+    }
+
+    /// The read cadence right now: the busy interval on battery, in a simulation, and while the
+    /// menu is open; the line-power interval otherwise.
+    var currentReadInterval: TimeInterval {
+        let busy = reading.onBattery || simulation != nil || menuOpen
+        return busy ? settings.busyReadInterval : settings.lineReadInterval
     }
 
     // MARK: Polling
@@ -170,12 +176,12 @@ final class UPSMonitor {
         let busy = snap.ups.onBattery || simulation != nil || menuOpen
         let hidBusy = hidStartedAt.map { now - $0 < UPSMonitor.hidAbandonAfter } ?? false
         if now >= hidDue, !hidBusy, hid.isAttached {
-            hidDue = now + (busy ? UPSMonitor.tickInterval : UPSMonitor.sampleInterval)
+            hidDue = now + (busy ? settings.busyReadInterval : settings.lineReadInterval)
             readHID(now: now)
         }
         reading = merge(iops: iops, hid: hidReport, hidAt: hidReadAt, now: now)
         if now >= sampleDue || snap.ups.onBattery != samples.last?.onBattery {
-            sampleDue = now + (busy ? UPSMonitor.tickInterval : UPSMonitor.sampleInterval)
+            sampleDue = now + (busy ? settings.busyReadInterval : settings.lineReadInterval)
             record(reading, now: now)
         }
         tickGuards(now: now)
@@ -206,14 +212,14 @@ final class UPSMonitor {
     }
 
     private func merge(iops: UPSReading, hid: UPSHID.Report?, hidAt: TimeInterval?, now: TimeInterval) -> UPSReading {
-        ReadingMerge.merge(iops: iops, hid: hid?.reading, hidAt: hidAt, now: now, freshFor: UPSMonitor.hidFreshFor)
+        ReadingMerge.merge(iops: iops, hid: hid?.reading, hidAt: hidAt, now: now, freshFor: settings.hidFreshFor)
     }
 
     private func record(_ r: UPSReading, now: TimeInterval) {
         samples.append(Sample(t: now, date: Date(), loadWatts: r.present ? r.loadWatts : nil, charge: r.present ? r.chargePercent : nil,
                               onBattery: r.present && r.onBattery, inputVoltage: r.present ? r.inputVoltage : nil,
                               runtimeSeconds: r.present ? r.runtimeSeconds : nil, batteryVoltage: r.present ? r.batteryVoltage : nil))
-        let cutoff = now - UPSMonitor.historyWindow - UPSMonitor.sampleInterval
+        let cutoff = now - settings.historyWindow - settings.lineReadInterval
         if let i = samples.firstIndex(where: { $0.t >= cutoff }), i > 0 { samples.removeFirst(i) }
     }
 
@@ -379,12 +385,10 @@ final class UPSMonitor {
     /// How old what the menu shows is, and the current cadence.
     var freshness: Freshness? {
         let now = monotonicNow()
-        let busy = reading.onBattery || simulation != nil || menuOpen
-        let interval = busy ? UPSMonitor.tickInterval : UPSMonitor.sampleInterval
-        if let at = hidReadAt, hid.isAttached, now - at < UPSMonitor.hidFreshFor * 4 {
-            return Freshness(age: now - at, interval: interval, source: "USB HID")
+        if let at = hidReadAt, hid.isAttached, now - at < settings.hidStaleAfter {
+            return Freshness(age: now - at, interval: currentReadInterval, source: "USB HID")
         }
-        if let at = lastPollAt { return Freshness(age: now - at, interval: UPSMonitor.tickInterval, source: "macOS") }
+        if let at = lastPollAt { return Freshness(age: now - at, interval: settings.busyReadInterval, source: "macOS") }
         return nil
     }
 
@@ -392,7 +396,8 @@ final class UPSMonitor {
 
     var health: [Health.Item] {
         Health.assess(reading: reading, hidAge: hidReadAt.map { monotonicNow() - $0 }, hidAttached: hid.isAttached,
-                      upsSeen: upsSeen, internalBattery: internalBattery, protectedMounted: protectedMountedCount)
+                      upsSeen: upsSeen, internalBattery: internalBattery, protectedMounted: protectedMountedCount,
+                      staleAfter: settings.hidStaleAfter)
     }
 
     var protectedMountedCount: Int { volumes.mounted.filter { settings.isProtected($0) }.count }

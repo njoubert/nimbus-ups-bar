@@ -18,6 +18,7 @@ import UpsGuardCore
 //   --render-dmg-background DIR [--signed]   write the disk image's background PNGs and exit
 //   --dump-bar PATH         render just the status item to PATH, quit (layout check)
 //   --dump-chart PATH       render the chart with fake data to PATH, quit (layout check)
+//   --dump-settings DIR     render each pane of the Settings window to DIR/N-name.png, quit (layout check)
 //   --dump-hid-raw PATH     write every raw HID element value of the attached UPS as JSON (the decode fixture); "-" for stdout
 //
 // Command-line use of the same readers and guard (no UI):
@@ -36,7 +37,7 @@ func usage() -> Never {
     usage: NimbusUpsBar [--enable-agent | --disable-agent | --agent-status | --agent-plist]
                         [--render-icon PATH [--size PX]] [--render-iconset DIR]
                         [--render-dmg-background DIR [--signed]] [--dump-bar PATH] [--dump-chart PATH]
-                        [--dump-hid-raw PATH] [--after-safe sleep|shutdown]
+                        [--dump-settings DIR] [--dump-hid-raw PATH] [--after-safe sleep|shutdown]
                         [--print | --print-menu | --watch | --simulate | --holders PATH | --volumes]
                         [--check-update | --preflight APP.app]
     """)
@@ -103,6 +104,7 @@ while !args.isEmpty {
             print("wrote \(path)")
         }
         exit(0)
+    case "--dump-settings": cli = .dumpSettings(dir: takeValue(a))
     case "--dump-hid-raw": cli = .dumpHIDRaw(path: takeValue(a))
     case "--after-safe": cli = .afterSafe(action: takeValue(a))
     case "--print": cli = .print
@@ -141,10 +143,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var monitor: UPSMonitor!
     var statusBar: StatusBarController!
     var updater: Updater?
+    var settings: SettingsWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
         NSApp.setActivationPolicy(.accessory)
+        MainMenu.install()
         Log.shared.persistToFile = true
 
         // One copy only. The newest one wins: when the launchd agent starts a copy while a
@@ -191,6 +195,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             RunLoop.main.add(t, forMode: .common)
         }
+    }
+
+    /// The Settings window, made on first use and kept.
+    @objc func showSettings() {
+        if settings == nil { settings = SettingsWindowController(monitor: monitor, updater: updater) }
+        settings?.show()
     }
 
     /// Turning the agent on makes launchd start a second copy at once (RunAtLoad), which then

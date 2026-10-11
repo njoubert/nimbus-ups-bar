@@ -22,7 +22,9 @@ final class ChartView: NSView {
 
     var samples: () -> [UPSMonitor.Sample] = { [] }
     var now: () -> TimeInterval = { monotonicNow() }
-    var span: TimeInterval = UPSMonitor.historyWindow
+    var span: TimeInterval = 3600
+    /// A gap between samples longer than this breaks the line (the app was not running).
+    var sampleGap: TimeInterval = 30
     var debugBackground = false
     private var hoverX: CGFloat?
     private var tracking: NSTrackingArea?
@@ -97,7 +99,7 @@ final class ChartView: NSView {
 
         // Time axis, under the bottom panel: the window's start on the left; the end marker
         // on the right is "now".
-        let ago = NSAttributedString(string: "\(Int(span / 60)) min ago", attributes: labelAttrs)
+        let ago = NSAttributedString(string: "\(Duration.text(span)) ago", attributes: labelAttrs)
         ago.draw(at: NSPoint(x: chargePlot.minX, y: chargePlot.minY - ago.size().height))
 
         // Hover: a crosshair through both panels and the readout in the top label strip.
@@ -188,7 +190,7 @@ final class ChartView: NSView {
         var lastT: TimeInterval?
         for smp in s {
             guard let v = value(smp) else { if !run.isEmpty { runs.append(run); run = [] }; lastT = nil; continue }
-            if let lt = lastT, smp.t - lt > UPSMonitor.sampleInterval * 3, !run.isEmpty { runs.append(run); run = [] }
+            if let lt = lastT, smp.t - lt > sampleGap, !run.isEmpty { runs.append(run); run = [] }
             run.append(NSPoint(x: x(for: smp.t, in: plot, now: now), y: plot.minY + CGFloat(min(1, max(0, v))) * plot.height))
             lastT = smp.t
         }
