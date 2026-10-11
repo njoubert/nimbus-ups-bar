@@ -86,7 +86,9 @@ any moment. Then:
   Now* / *Mount*, its UUID, device, mount point, drive model, and the processes holding it.
 - **UPS Health**: the checks below, each with a dot, and *Run Battery Self-Test…*, the UPS's own
   ten-second quick test.
-- **Inspector…** (⌘I): a window with everything the app knows, live. A sidebar of sections: every
+- **Inspector…** (⌘I): a window with everything the app knows, live. *Unified* puts every page in
+  one table (and its JSON adds the recent changes and the log tail; *Copy All* copies it, the same
+  document `--inspect-json` prints). Then a page per section: every
   field the UPS reports over USB HID (decoded, with each element's collection, page, usage and raw
   value), the entry macOS keeps for it (`pmset -g ps`) and the Mac's own battery, the health
   checks, the outage guard (phase, countdowns, the policy it runs), the protected volumes and who
@@ -94,7 +96,7 @@ any moment. Then:
   and the background agent and this copy (SMAppService status, the launchd job's state, pid, runs
   and last exit code, the bundle, the version). Each section is a table whose rows flash when a
   value changes, or the same as JSON; *Copy Page* puts the page's JSON on the clipboard, the form
-  to paste into an agent (`--inspect-json` prints every page at once). *Changes* lists every value that moved
+  to paste into an agent. *Changes* lists every value that moved
   since the window opened, with the old and the new. *Events* is what the app decided and did,
   newest first, each line with an icon and a colour for its kind (outage, stage, apps, volumes,
   the UPS, problems, rehearsals; the once-a-minute progress lines on request). *Log File* is the

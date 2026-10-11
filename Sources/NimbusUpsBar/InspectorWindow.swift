@@ -40,7 +40,7 @@ final class InspectorWindowController: NSWindowController, NSWindowDelegate {
         sidebar.onSelect = { [weak self] id in self?.detail.show(id) }
         model.refresh()
         sidebar.reload()
-        sidebar.select("ups")
+        sidebar.select("unified")
         for name in [UPSMonitor.didUpdate, Log.didAppend] {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.scheduleRefresh() }
@@ -117,7 +117,8 @@ final class InspectorSidebar: NSViewController, NSTableViewDataSource, NSTableVi
     }
 
     func reload() {
-        var e = model.sections.map { (id: $0.id, title: $0.title, symbol: $0.symbol, badge: nil as String?) }
+        var e = [(id: "unified", title: "Unified", symbol: "square.stack.3d.up", badge: nil as String?)]
+        e += model.sections.map { (id: $0.id, title: $0.title, symbol: $0.symbol, badge: nil as String?) }
         e.append((id: "changes", title: "Changes", symbol: "arrow.triangle.2.circlepath", badge: model.changes.isEmpty ? nil : "\(min(model.changes.count, 999))"))
         e.append((id: "events", title: "Events", symbol: "list.bullet.rectangle", badge: nil))
         e.append((id: "log", title: "Log File", symbol: "doc.plaintext", badge: nil))
@@ -216,9 +217,8 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
         mode.target = self
         mode.action = #selector(modeChanged)
         copied = NSButton(title: "Copy Page", target: self, action: #selector(copySection))
-        copied.toolTip = "Copy this page as JSON (in Table view too; the Log File as its text): the form to paste into an agent."
 
-        for (id, title, width) in [("label", "Field", 250.0), ("value", "Value", 400.0), ("detail", "Detail", 260.0)] {
+        for (id, title, width) in [("label", "Field", 230.0), ("value", "Value", 290.0), ("detail", "Detail", 210.0)] {
             let c = NSTableColumn(identifier: .init(id))
             c.title = title
             c.width = width
@@ -313,7 +313,14 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
         reload(force: true)
     }
 
+    /// The copy button reads Copy All on the Unified page, which is everything.
+    private var copyTitle: String { current == "unified" ? "Copy All" : "Copy Page" }
+
     private func layoutFor(_ id: String) {
+        if copied.title != "Copied" { copied.title = copyTitle }
+        copied.toolTip = current == "unified"
+            ? "Copy every page, the recent changes and the log tail as one JSON document (what --inspect-json prints): the form to paste into an agent."
+            : "Copy this page as JSON (in Table view too; the Log File as its text): the form to paste into an agent."
         let isLog = id == "log"
         mode.isHidden = isLog
         tableScroll.isHidden = isLog || showingJSON
@@ -341,6 +348,7 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
 
     private func currentJSON() -> Any {
         switch current {
+        case "unified": return model.snapshot()
         case "changes": return model.changesJSON()
         case "events", "log": return model.logJSON()
         default: return section?.json ?? [:]
@@ -367,6 +375,19 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
             titleLabel.stringValue = "Log File"
             followLog(force: force)
             return
+        case "unified":
+            titleLabel.stringValue = "Unified"
+            subtitle.stringValue = "Every page in one place; the JSON adds the recent changes and the log · updated \(f.string(from: model.updatedAt))"
+            var out: [Line] = []
+            var heading = ""
+            for s in model.sections {
+                for r in s.rows {
+                    let h = s.title + (r.group.map { " › " + $0 } ?? "")
+                    if h != heading { out.append(.group(h)); heading = h }
+                    out.append(.row(r, flashKey: s.id + " › " + r.key))
+                }
+            }
+            lines = out
         default:
             guard let s = section else { return }
             titleLabel.stringValue = s.title
@@ -406,7 +427,7 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
     @objc private func revealLog() { NSWorkspace.shared.activateFileViewerSelecting([Log.fileURL]) }
 
     @objc private func copySection() {
-        put(current == "log" ? logText.string : Inspector.json(currentJSON()), on: copied, title: "Copy Page")
+        put(current == "log" ? logText.string : Inspector.json(currentJSON()), on: copied, title: copyTitle)
     }
 
     /// The log file's last `logTail` bytes, then whatever is appended, keeping the view at the
