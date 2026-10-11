@@ -118,7 +118,7 @@ Sources/NimbusUpsBar/        the app
                              the charge limit, outage bands, hover readout
   AppIcon.swift, DMGBackground.swift, Updates.swift   as in the siblings
 Tests/UpsGuardCoreTests/     76 scenarios against FakeEnvironment, each rehearsal scenario among them
-Tests/NimbusUpsBarKitTests/  45 checks: the HID decode against Fixtures/cp1500pfclcda.json and
+Tests/NimbusUpsBarKitTests/  47 checks: the HID decode against Fixtures/cp1500pfclcda.json and
                              hand-made maps, every health rule, the DA dictionary filter, the
                              holder resolver, the merge
 docs/                        icon.png (build.sh icon); phase-2-email-notifications.md (design)
@@ -137,7 +137,7 @@ main.
 
 ```
 ./build.sh run [--fg]         debug build as dist/debug/Nimbus UPS Bar.app (quits any running copy first)
-./build.sh test               swift test: the 76 guard scenarios and the 45 platform checks
+./build.sh test               swift test: the 76 guard scenarios and the 47 platform checks
 ./build.sh install            release → /Applications, register the agent (owner's call), launch
 .build/debug/NimbusUpsBar --print        the UPS, health, every HID field, volumes, holders, policy
 .build/debug/NimbusUpsBar --print-menu   the menu built against the real UPS, as an indented tree

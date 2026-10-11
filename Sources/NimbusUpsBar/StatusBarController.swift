@@ -190,7 +190,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
                 color = overall == .bad ? .systemRed : overall == .warning ? .systemYellow : .systemGreen
                 var parts: [String] = []
                 // A warning or fault leads the line; the rest is context.
-                if let concern = Health.headline(health) { parts.append(concern.text) }
+                if let concern = Health.headline(health) { parts.append(concern.label.prefix(1).uppercased() + concern.label.dropFirst()) }
                 else if let n = r.name { parts.append(n) }
                 parts.append("\(monitor.protectedMountedCount) protected volume\(monitor.protectedMountedCount == 1 ? "" : "s") mounted")
                 if let last = st.lastOutageSeconds { parts.append("last outage \(Duration.text(last))") }
@@ -298,8 +298,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
         let health = monitor.health
         let overall = Health.overall(health)
-        let concern = Health.headline(health).map { $0.text.prefix(1).lowercased() + $0.text.dropFirst() }
-        let healthItem = NSMenuItem(title: "UPS Health: " + (concern ?? "fine"), action: nil, keyEquivalent: "")
+        let healthItem = NSMenuItem(title: "UPS Health: " + (Health.headline(health)?.label ?? "healthy"), action: nil, keyEquivalent: "")
         healthItem.image = StatusBarController.dot(overall)
         healthItem.submenu = healthMenu(health)
         menu.addItem(healthItem)
