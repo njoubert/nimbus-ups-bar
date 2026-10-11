@@ -329,72 +329,107 @@ final class DurationFormatter: Formatter {
 
 // MARK: Outage
 
-/// The policy: the grace, the soft stage and its timeout, the three hard limits (the time one
-/// is always on; it is the backstop), the readings blackout, the after-safe action, and the
-/// never-quit list.
+/// The policy: three stages (ask apps, force unmount, sleep or shut down), each begun by
+/// whichever of its ticked conditions comes first; the apps' quit timeout; what a missing UPS
+/// means; the readings blackout and the line-stable window; and the never-quit list.
 @MainActor
 final class OutagePane: SettingsPane, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
-    private var grace: NSTextField!
+    private static let cellWidth: CGFloat = 106
+    private var checks: [Settings.Stage: [Settings.Condition: NSButton]] = [:]
+    private var fields: [Settings.Stage: [Settings.Condition: NSTextField]] = [:]
     private var quitApps: NSButton!
     private var quitTimeoutOn: NSButton!
     private var quitTimeout: NSTextField!
-    private var hardAfter: NSTextField!
-    private var hardAtPercentOn: NSButton!
-    private var hardAtPercent: NSTextField!
-    private var hardAtRuntimeOn: NSButton!
-    private var hardAtRuntime: NSTextField!
-    private var ignoreReadings: NSTextField!
-    private var lineStable: NSTextField!
-    private var afterSafe: NSPopUpButton!
+    private var powerAction: NSPopUpButton!
+    private var powerWhenSafe: NSButton!
+    private var upsGone: NSTextField!
+    private var upsGoneInOutage: NSPopUpButton!
+    private var upsGonePowersDown: NSButton!
+    private var upsGoneOnLine: NSPopUpButton!
     private var neverQuitTable: NSTableView!
     private var addApp: NSPopUpButton!
     private var removeApp: NSButton!
     private var entries: [String] = []
 
+    /// One cell of the stage grid: a checkbox, the number, its unit.
+    private func cell(_ st: Settings.Stage, _ c: Settings.Condition) -> NSView {
+        let check = Controls.checkbox("", self, #selector(apply))
+        let field: NSTextField
+        var views: [NSView] = [check]
+        switch c {
+        case .time, .runtime:
+            field = Controls.duration(self, #selector(apply), width: 72)
+            views.append(field)
+        case .charge:
+            field = Controls.integer(self, #selector(apply), range: 0...100, width: 44)
+            views += [field, Form.label("%")]
+        }
+        checks[st, default: [:]][c] = check
+        fields[st, default: [:]][c] = field
+        let line = NSStackView(views: views)
+        line.orientation = .horizontal
+        line.spacing = 4
+        line.widthAnchor.constraint(equalToConstant: OutagePane.cellWidth).isActive = true
+        return line
+    }
+
+    private func header(_ text: String) -> NSView {
+        let l = Form.label(text)
+        l.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        l.textColor = .secondaryLabelColor
+        l.widthAnchor.constraint(equalToConstant: OutagePane.cellWidth).isActive = true
+        return l
+    }
+
+    private func stageRow(_ label: String, _ st: Settings.Stage, hint: String? = nil) {
+        form.row(label, Form.line(cell(st, .time), cell(st, .runtime), cell(st, .charge)), hint: hint)
+    }
+
     override func build() {
-        form.section("Stages")
-        grace = Controls.duration(self, #selector(apply))
-        form.row("Wait before acting:", grace,
-                 hint: "On battery this long, nothing happens beyond a notification; a flicker disturbs nothing.")
+        form.section("Stages: each begins at whichever ticked condition comes first")
+        form.row("", Form.line(header("On battery for"), header("Runtime left ≤"), header("Charge ≤")))
+        stageRow("Ask apps to quit:", .soft)
+        stageRow("Force unmount:", .hard)
+        stageRow("Sleep or shut down:", .powerDown,
+                 hint: "Force unmount needs at least one. The charge gauge sags 20–30 points in the first minute; runtime is the better guide.")
 
         quitApps = Controls.checkbox("Ask the apps holding files to quit", self, #selector(apply))
-        form.row("Then:", quitApps,
-                 hint: "Each gets the same quit event as its Quit menu, once per outage. A volume unmounts as soon as no app holds it.")
+        form.row("At the first stage:", quitApps,
+                 hint: "Once each, like their Quit menu; a volume unmounts once no app holds it.")
         quitTimeoutOn = Controls.checkbox("", self, #selector(apply))
-        quitTimeoutOn.toolTip = "Off: an app that will not quit keeps its volume mounted until a hard limit."
+        quitTimeoutOn.toolTip = "Off: an app that will not quit keeps its volume mounted until the forced unmount."
         quitTimeout = Controls.duration(self, #selector(apply), width: 80)
         form.row("Give them at most:", Form.line(quitTimeoutOn, quitTimeout),
-                 hint: "Counted from the ask; then their volume is unmounted anyway. Off: a stubborn app keeps its volume until a hard limit.")
+                 hint: "From the ask; then their volume is unmounted anyway.")
 
-        hardAfter = Controls.duration(self, #selector(apply))
-        form.row("Unmount regardless after:", hardAfter,
-                 hint: "Every protected volume is force-unmounted, open apps or not. Always on: this is the backstop.")
-        hardAtPercentOn = Controls.checkbox("", self, #selector(apply))
-        hardAtPercentOn.toolTip = "Off: the charge gauge never forces an unmount."
-        hardAtPercent = Controls.integer(self, #selector(apply), range: 0...100)
-        form.row("…or when the charge is at or below:", Form.line(hardAtPercentOn, hardAtPercent, Form.label("%")),
-                 hint: "The UPS's gauge follows the battery voltage: it sags 20–30 points in the first minute under load, then flattens.")
-        hardAtRuntimeOn = Controls.checkbox("", self, #selector(apply))
-        hardAtRuntimeOn.toolTip = "Off: the runtime estimate never forces an unmount."
-        hardAtRuntime = Controls.duration(self, #selector(apply), width: 80)
-        form.row("…or when the runtime estimate is at or below:", Form.line(hardAtRuntimeOn, hardAtRuntime),
-                 hint: "The UPS's own estimate at the current load; it tracks the load and is the better guide.")
-
-        ignoreReadings = Controls.duration(self, #selector(apply))
-        form.row("Ignore readings for the first:", ignoreReadings,
-                 hint: "Charge and runtime are not trusted this long after the transfer; some UPSes report 0 % for a moment.")
-        lineStable = Controls.duration(self, #selector(apply))
-        form.row("Power must stay back for:", lineStable,
-                 hint: "Before the outage counts as over. Under a brownout that transfers every few seconds, the clock and the limits keep running.")
-
-        form.section("Afterwards")
-        afterSafe = Controls.popup(self, #selector(apply))
-        for a in Policy.AfterSafe.allCases {
-            afterSafe.addItem(withTitle: a.title)
-            afterSafe.lastItem?.representedObject = a.rawValue
+        powerAction = Controls.popup(self, #selector(apply))
+        for a in Policy.MacAction.allCases {
+            powerAction.addItem(withTitle: a.title)
+            powerAction.lastItem?.representedObject = a.rawValue
         }
-        form.row("Once every volume is safe:", afterSafe,
-                 hint: "Never before the wait is over, so a blip cannot sleep the Mac. Test Shut down once at the keyboard.")
+        powerWhenSafe = Controls.checkbox("Also as soon as every volume is safe", self, #selector(apply))
+        form.row("Sleep or shut down means:", Form.stack(powerAction, powerWhenSafe),
+                 hint: "Volumes are forced off first (a minute at most). Test Shut down once at the keyboard: --after-safe.")
+
+        form.section("If the UPS goes missing from USB")
+        upsGone = Controls.duration(self, #selector(apply))
+        form.row("Missing for:", upsGone,
+                 hint: "Shorter is a USB re-enumeration, not a lost UPS.")
+        upsGoneInOutage = Controls.popup(self, #selector(apply))
+        for o in Policy.UPSGoneInOutage.allCases {
+            upsGoneInOutage.addItem(withTitle: o.title)
+            upsGoneInOutage.lastItem?.representedObject = o.rawValue
+        }
+        upsGonePowersDown = Controls.checkbox("And sleep or shut down the Mac", self, #selector(apply))
+        form.row("During an outage:", Form.stack(upsGoneInOutage, upsGonePowersDown),
+                 hint: "Usually its battery ran flat. Carrying on counts time against the last reading.")
+        upsGoneOnLine = Controls.popup(self, #selector(apply))
+        for o in Policy.UPSGoneOnLine.allCases {
+            upsGoneOnLine.addItem(withTitle: o.title)
+            upsGoneOnLine.lastItem?.representedObject = o.rawValue
+        }
+        form.row("On line power:", upsGoneOnLine,
+                 hint: "A pulled cable: an outage would go unseen. Volumes remount when it is back.")
 
         form.section("Never quit")
         let (scroll, table) = Controls.table(self, columns: [("app", Form.controlWidth - 20)], height: 56)
@@ -408,7 +443,7 @@ final class OutagePane: SettingsPane, NSTableViewDataSource, NSTableViewDelegate
         removeApp = Controls.button("Remove", self, #selector(removeEntry))
         removeApp.isEnabled = false
         form.row("Apps left alone:", Form.stack(scroll, Form.line(addApp, removeApp)),
-                 hint: "Besides Finder. Never asked to quit, never waited for: a volume they hold unmounts only at a hard limit. Bundle id or name.")
+                 hint: "Besides Finder. Never asked, never waited for. Bundle id or name.")
     }
 
     override func loadView() {
@@ -418,26 +453,34 @@ final class OutagePane: SettingsPane, NSTableViewDataSource, NSTableViewDelegate
         form.finish(trailing: Controls.button("Restore Defaults", self, #selector(restore)))
     }
 
+    private static func select<T: RawRepresentable>(_ popup: NSPopUpButton, _ value: T) where T.RawValue == String {
+        popup.selectItem(at: popup.indexOfItem(withRepresentedObject: value.rawValue))
+    }
+
     override func reload() {
         let s = Settings.shared
         let p = s.policy
         withoutActions {
-            grace.objectValue = p.graceSeconds
+            for st in Settings.Stage.allCases {
+                let t = st.trigger(of: p)
+                for c in Settings.Condition.allCases {
+                    let v = Settings.Condition.value(c, of: t)
+                    checks[st]?[c]?.state = v != nil ? .on : .off
+                    fields[st]?[c]?.objectValue = v ?? s.value(st, c)
+                    fields[st]?[c]?.isEnabled = v != nil
+                }
+            }
             quitApps.state = p.quitApps ? .on : .off
             quitTimeoutOn.state = p.quitTimeoutSeconds != nil ? .on : .off
             quitTimeout.objectValue = p.quitTimeoutSeconds ?? s.quitTimeoutValue
             quitTimeoutOn.isEnabled = p.quitApps
             quitTimeout.isEnabled = p.quitApps && p.quitTimeoutSeconds != nil
-            hardAfter.objectValue = p.hardAfterSeconds
-            hardAtPercentOn.state = p.hardAtPercent != nil ? .on : .off
-            hardAtPercent.objectValue = p.hardAtPercent ?? s.hardAtPercentValue
-            hardAtPercent.isEnabled = p.hardAtPercent != nil
-            hardAtRuntimeOn.state = p.hardAtRuntimeSeconds != nil ? .on : .off
-            hardAtRuntime.objectValue = Double(p.hardAtRuntimeSeconds ?? s.hardAtRuntimeValue)
-            hardAtRuntime.isEnabled = p.hardAtRuntimeSeconds != nil
-            ignoreReadings.objectValue = p.ignoreReadingsSeconds
-            lineStable.objectValue = p.lineStableSeconds
-            afterSafe.selectItem(at: Policy.AfterSafe.allCases.firstIndex(of: p.afterSafe) ?? 0)
+            OutagePane.select(powerAction, p.powerDownAction)
+            powerWhenSafe.state = p.powerDownWhenSafe ? .on : .off
+            upsGone.objectValue = p.upsGoneSeconds
+            OutagePane.select(upsGoneInOutage, p.upsGoneInOutage)
+            upsGonePowersDown.state = p.upsGoneInOutagePowersDown ? .on : .off
+            OutagePane.select(upsGoneOnLine, p.upsGoneOnLine)
             entries = p.neverQuit.subtracting(Policy.alwaysKept).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
             neverQuitTable.reloadData()
             removeApp.isEnabled = neverQuitTable.selectedRow >= 0
@@ -446,20 +489,28 @@ final class OutagePane: SettingsPane, NSTableViewDataSource, NSTableViewDelegate
 
     @objc private func apply() {
         guard !reloading else { return }
-        var p = Settings.shared.policy
-        p.graceSeconds = Controls.value(grace) ?? p.graceSeconds
+        let s = Settings.shared
+        var p = s.policy
+        for st in Settings.Stage.allCases {
+            var t = Trigger()
+            for c in Settings.Condition.allCases where checks[st]?[c]?.state == .on {
+                Settings.Condition.set(c, fields[st]?[c].flatMap { Controls.value($0) } ?? s.value(st, c), in: &t)
+            }
+            st.set(t, in: &p)
+        }
+        let hardWasNever = p.hardAt.isNever
         p.quitApps = quitApps.state == .on
-        p.quitTimeoutSeconds = quitTimeoutOn.state == .on ? (Controls.value(quitTimeout) ?? Settings.shared.quitTimeoutValue) : nil
-        p.hardAfterSeconds = Controls.value(hardAfter) ?? p.hardAfterSeconds
-        p.hardAtPercent = hardAtPercentOn.state == .on ? Int(Controls.value(hardAtPercent) ?? Double(Settings.shared.hardAtPercentValue)) : nil
-        p.hardAtRuntimeSeconds = hardAtRuntimeOn.state == .on ? Int(Controls.value(hardAtRuntime) ?? Double(Settings.shared.hardAtRuntimeValue)) : nil
-        p.ignoreReadingsSeconds = Controls.value(ignoreReadings) ?? p.ignoreReadingsSeconds
-        p.lineStableSeconds = Controls.value(lineStable) ?? p.lineStableSeconds
-        if let raw = afterSafe.selectedItem?.representedObject as? String, let a = Policy.AfterSafe(rawValue: raw) { p.afterSafe = a }
+        p.quitTimeoutSeconds = quitTimeoutOn.state == .on ? (Controls.value(quitTimeout) ?? s.quitTimeoutValue) : nil
+        if let raw = powerAction.selectedItem?.representedObject as? String, let a = Policy.MacAction(rawValue: raw) { p.powerDownAction = a }
+        p.powerDownWhenSafe = powerWhenSafe.state == .on
+        p.upsGoneSeconds = Controls.value(upsGone) ?? p.upsGoneSeconds
+        if let raw = upsGoneInOutage.selectedItem?.representedObject as? String, let o = Policy.UPSGoneInOutage(rawValue: raw) { p.upsGoneInOutage = o }
+        p.upsGoneInOutagePowersDown = upsGonePowersDown.state == .on
+        if let raw = upsGoneOnLine.selectedItem?.representedObject as? String, let o = Policy.UPSGoneOnLine(rawValue: raw) { p.upsGoneOnLine = o }
         p.neverQuit = Set(entries.filter { !$0.isEmpty })
-        Settings.shared.policy = p
-        if Settings.shared.policy.hardAfterSeconds != Controls.value(hardAfter) {
-            form.status.stringValue = "The time limit cannot come before the wait ends; it was moved to \(Duration.text(Settings.shared.policy.hardAfterSeconds))."
+        s.policy = p
+        if hardWasNever {
+            form.status.stringValue = "Force unmount needs at least one condition; the time on battery was turned back on."
         }
     }
 
@@ -666,6 +717,8 @@ final class ReadingsPane: SettingsPane {
     private var busy: NSTextField!
     private var history: NSPopUpButton!
     private var showLoad: NSButton!
+    private var ignoreReadings: NSTextField!
+    private var lineStable: NSTextField!
 
     override func build() {
         form.section("Reading the UPS")
@@ -677,6 +730,14 @@ final class ReadingsPane: SettingsPane {
                  hint: "Also during a simulation and while the menu is open. The outage guard ticks on this clock, so its countdowns move in these steps. 1 s to 1 min, never slower than on line power.")
         form.note("The line/battery state does not wait for a read: macOS posts an event the instant the UPS transfers, and the guard acts on it. "
                   + "A read that stays unanswered for three intervals (at least a minute) is a health warning.")
+
+        form.section("Trusting the readings in an outage")
+        ignoreReadings = Controls.duration(self, #selector(apply))
+        form.row("Ignore charge and runtime for:", ignoreReadings,
+                 hint: "After the transfer; some UPSes report 0 % for a moment. Only the time conditions count meanwhile.")
+        lineStable = Controls.duration(self, #selector(apply))
+        form.row("Power must stay back for:", lineStable,
+                 hint: "Before the outage counts as over. Under a brownout that transfers every few seconds, the clock and the stages keep running.")
 
         form.section("Chart")
         history = Controls.popup(self, #selector(apply))
@@ -706,6 +767,8 @@ final class ReadingsPane: SettingsPane {
                 if h == s.historyWindow { history.select(history.lastItem) }
             }
             showLoad.state = s.showLoadInBar ? .on : .off
+            ignoreReadings.objectValue = s.policy.ignoreReadingsSeconds
+            lineStable.objectValue = s.policy.lineStableSeconds
         }
     }
 
@@ -716,6 +779,10 @@ final class ReadingsPane: SettingsPane {
         if let v = Controls.value(busy), v != s.busyReadInterval { s.busyReadInterval = v }
         if let h = history.selectedItem?.representedObject as? TimeInterval, h != s.historyWindow { s.historyWindow = h }
         if (showLoad.state == .on) != s.showLoadInBar { s.showLoadInBar = showLoad.state == .on }
+        var p = s.policy
+        p.ignoreReadingsSeconds = Controls.value(ignoreReadings) ?? p.ignoreReadingsSeconds
+        p.lineStableSeconds = Controls.value(lineStable) ?? p.lineStableSeconds
+        if p != s.policy { s.policy = p }
         var notes: [String] = []
         if let v = Controls.value(line), v != s.lineReadInterval { notes.append("line-power interval kept between 2 s and 10 min") }
         if let v = Controls.value(busy), v != s.busyReadInterval { notes.append("battery interval kept between 1 s and the line-power interval") }

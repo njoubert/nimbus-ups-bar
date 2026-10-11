@@ -55,7 +55,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         let s = Settings.shared
         chart.span = s.historyWindow
         chart.sampleGap = s.lineReadInterval * 3
-        chart.chargeLimit = s.policy.hardAtPercent
+        chart.chargeLimit = s.policy.hardAt.chargeAtMost
         chart.needsDisplay = true
         headline.toolTip = "Charge, load and voltages come from a USB read of the UPS: every \(Int(s.lineReadInterval)) s on line power, every \(Int(s.busyReadInterval)) s on battery and while this menu is open (Settings › Readings). "
             + "The line/battery state also arrives from macOS the moment it changes. The top-right figure is the age of what you see."
@@ -198,26 +198,31 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             }
         case .holding:
             color = .systemOrange
-            if let soft = st.untilSoft {
-                subtitle = (st.quitAppsThisOutage ? "Apps asked to quit in \(Duration.countdown(soft))" : "Free volumes unmount in \(Duration.countdown(soft))")
-                if let hard = st.untilForce { subtitle += " · forced by \(Duration.countdown(hard))" }
-            }
+            let first = st.quitAppsThisOutage ? "Apps asked to quit" : "Free volumes unmount"
+            if let soft = st.untilSoft { subtitle = "\(first) in \(Duration.countdown(soft))" }
+            else if !p.softAt.isNever { subtitle = "\(first) at \(p.softAt.summary)" }
+            else { subtitle = "Holding until a forced unmount" }
+            if let hard = st.untilForce { subtitle += " · forced by \(Duration.countdown(hard))" }
         case .soft:
             color = .systemOrange
             subtitle = st.waitingFor.isEmpty ? "Unmounting volumes no app is using" : "Waiting for \(st.waitingFor.joined(separator: ", "))"
             if let hard = st.untilForce { subtitle += " · forced in \(Duration.countdown(hard))" }
         case .hard:
             color = .systemRed
-            subtitle = st.hardReasons.first.map { "Hard limit: \($0)" } ?? "Force-unmounting every protected volume"
+            subtitle = st.powerDownPending ? "Unmounting before the Mac goes to \(p.powerDownAction.verb)"
+                : st.hardReasons.first.map { "Hard limit: \($0)" } ?? "Force-unmounting every protected volume"
         case .safe:
             color = .systemGreen
             let n = st.volumes.filter(\.unmountedByGuard).count
             subtitle = n == 0 ? "Nothing was mounted; waiting for power" : "\(n) volume\(n == 1 ? "" : "s") unmounted; waiting for power"
-            if p.afterSafe != .keepRunning { subtitle += " · then: \(p.afterSafe.title.lowercased())" }
+            if st.powerDownPending { subtitle += " · about to \(p.powerDownAction.verb)" }
+            else if p.powerDownWhenSafe { subtitle += " · then: \(p.powerDownAction.title.lowercased())" }
         case .restoring:
             color = .systemBlue
             subtitle = "Power is back; remounting"
         }
+        if st.phase.isOutage, st.phase != .safe, let down = st.untilPowerDown { subtitle += " · \(p.powerDownAction.verb) in \(Duration.countdown(down))" }
+        if st.blind { title = "UPS not seen" }
         // The two debounces: mains back but not yet trusted, and the UPS not answering.
         if st.phase.isOutage, let sd = st.untilStandDown {
             color = .systemBlue
@@ -536,9 +541,15 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             refreshLiveRows()
             if sim.kind == .drill { m.addItem(disabled("A drill really unmounts; ending it early leaves volumes as they are")) }
         } else {
-            let r = action("Rehearse an Outage (Nothing Is Touched)", #selector(startRehearsal))
-            r.toolTip = "Plays a pretend outage at 10× speed against the real volumes and the real apps holding them, and logs what it would do: which apps it would ask to quit, when it would unmount. Nothing is quit or unmounted."
-            m.addItem(r)
+            m.addItem(disabled("Rehearse (nothing is touched, 10× speed):"))
+            for scenario in SimulatedOutage.Scenario.allCases {
+                let r = action(scenario.title, #selector(startRehearsal(_:)))
+                r.representedObject = scenario.rawValue
+                r.indentationLevel = 1
+                r.toolTip = "Plays a pretend outage at 10× speed against the real volumes and the real apps holding them, under the current policy, and logs what it would do: which apps it would ask to quit, when it would unmount, whether it would sleep or shut down. Nothing is quit, unmounted, slept or shut down."
+                m.addItem(r)
+            }
+            m.addItem(.separator())
             let d = action("Drill: Simulate an Outage With Real Unmounts…", #selector(startDrill))
             d.toolTip = "A pretend outage at 5× speed with real actions: apps holding files are asked to quit, the protected volumes are force-unmounted, and remounted when the pretend power returns. Never sleeps or shuts down the Mac."
             d.isEnabled = !(monitor.reading.present && monitor.reading.onBattery)
@@ -674,7 +685,9 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         }
     }
 
-    @objc private func startRehearsal() { monitor.startRehearsal() }
+    @objc private func startRehearsal(_ sender: NSMenuItem) {
+        monitor.startRehearsal(SimulatedOutage.Scenario(rawValue: sender.representedObject as? String ?? "") ?? .drain)
+    }
 
     @objc private func startDrill() {
         let names = monitor.volumes.mounted.filter { Settings.shared.isProtected($0) }.map(\.name)

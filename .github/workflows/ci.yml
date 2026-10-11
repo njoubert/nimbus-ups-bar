@@ -27,7 +27,7 @@ jobs:
         # The runner has no UPS, no external disk and no window server; every command must
         # still exit 0. --print-menu builds every submenu (headless: no status item), so a
         # crash in menu code is caught without a screen; --simulate walks the whole rehearsal
-        # with the pretend UPS (about 30 s).
+        # with the pretend UPS, once per scenario (about 30 s each).
         env:
           NIMBUS_UPS_TRACE: 1
         run: |
@@ -37,7 +37,7 @@ jobs:
           run "$bin" --volumes
           run "$bin" --print-menu
           run "$bin" --agent-status || true
-          run "$bin" --simulate
+          for s in drain shortBattery upsLostInOutage upsLostOnLine; do run "$bin" --simulate "$s"; done
       - name: Build release
         run: swift build -c release
 

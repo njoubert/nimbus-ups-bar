@@ -33,7 +33,6 @@ final class UPSMonitor {
         let outage: SimulatedOutage
         let guardian: OutageGuard
         let startedAt: Date
-        var safeSince: TimeInterval?
         var lineSince: TimeInterval?
         init(kind: SimulationKind, outage: SimulatedOutage, guardian: OutageGuard) {
             self.kind = kind; self.outage = outage; self.guardian = guardian; startedAt = Date()
@@ -305,10 +304,10 @@ final class UPSMonitor {
 
     /// A rehearsal: the real volumes and holders, a pretend UPS, and nothing touched. The live
     /// guard keeps running underneath it.
-    func startRehearsal() {
+    func startRehearsal(_ scenario: SimulatedOutage.Scenario = .drain) {
         guard simulation == nil else { return }
         let env = RehearsalEnvironment(base: environment, speed: UPSMonitor.rehearsalSpeed)
-        start(kind: .rehearsal, env: env, speed: UPSMonitor.rehearsalSpeed)
+        start(kind: .rehearsal, env: env, speed: UPSMonitor.rehearsalSpeed, scenario: scenario)
     }
 
     /// A drill: real quits, real unmounts, real remounts, driven by a pretend UPS. Only from
@@ -319,16 +318,16 @@ final class UPSMonitor {
         start(kind: .drill, env: env, speed: UPSMonitor.drillSpeed)
     }
 
-    private func start(kind: SimulationKind, env: GuardEnvironment, speed: Double) {
+    private func start(kind: SimulationKind, env: GuardEnvironment, speed: Double, scenario: SimulatedOutage.Scenario = .drain) {
         let now = monotonicNow()
         // A pretend battery short enough that the decline shows, long enough that the time
         // limits (not the runtime limit) are what fire with the default policy.
         let runtime = min(reading.runtimeSeconds ?? 40 * 60, 40 * 60)
-        let outage = SimulatedOutage(template: reading.present ? reading : nil, initialRuntime: runtime, speed: speed, realNow: now)
+        let outage = SimulatedOutage(template: reading.present ? reading : nil, initialRuntime: runtime, speed: speed, realNow: now, scenario: scenario)
         let g = OutageGuard(environment: env, policy: settings.policy)
         g.onChange = { [weak self] in self?.onChange?() }
         simulation = Simulation(kind: kind, outage: outage, guardian: g)
-        log.append("\(kind.rawValue) started at \(Int(speed))× speed: pretend outage, battery good for \(Duration.text(TimeInterval(runtime)))")
+        log.append("\(kind.rawValue) started at \(Int(speed))× speed: \(scenario.title.lowercased()), battery good for \(Duration.text(TimeInterval(outage.initialRuntime)))")
         g.tick(UPSReading(present: true, name: outage.name, onBattery: false, chargePercent: 100, runtimeSeconds: runtime, timestamp: now))
         hidDue = 0
         poll(reason: nil)
@@ -337,17 +336,7 @@ final class UPSMonitor {
     private func advanceSimulation(_ sim: Simulation, now: TimeInterval) {
         let st = sim.guardian.status
         if !sim.outage.powerRestored {
-            if st.phase == .safe {
-                if sim.safeSince == nil { sim.safeSince = now }
-                // Hold "safe" for a moment so it can be seen, then bring the power back.
-                if now - (sim.safeSince ?? now) >= 20 / sim.outage.speed {
-                    sim.outage.restorePower(realNow: now)
-                    log.append("\(sim.kind.rawValue): pretend power restored")
-                }
-            } else if !sim.outage.reading(realNow: now, monotonicStamp: now).present {
-                sim.outage.restorePower(realNow: now)
-                log.append("\(sim.kind.rawValue): the pretend UPS ran flat; pretend power restored")
-            }
+            if let what = sim.outage.advance(phase: st.phase, realNow: now) { log.append("\(sim.kind.rawValue): \(what)") }
         } else if st.phase == .line {
             if sim.lineSince == nil { sim.lineSince = now }
             if now - (sim.lineSince ?? now) >= 3 { endSimulation(reason: "finished") }
@@ -448,10 +437,9 @@ final class RealEnvironment: GuardEnvironment {
 
     func notify(title: String, body: String) { MainActor.assumeIsolated { Notifications.shared.post(title: title, body: body) } }
 
-    func perform(_ action: Policy.AfterSafe) {
+    func perform(_ action: Policy.MacAction) {
         MainActor.assumeIsolated {
             switch action {
-            case .keepRunning: break
             case .sleep: PowerActions.sleep()
             case .shutDown: PowerActions.shutDown()
             }

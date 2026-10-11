@@ -59,25 +59,30 @@ README before changing the policy or the stages.
   screen: `--dump-chart`, `--dump-settings`, `--dump-bar`, `--render-dmg-background`; for what
   they do not cover (the open menu as a whole), ask the owner for one.
 - **Where the images live:** `gh` cannot upload images into a PR body, so they go on the orphan
-  branch `pr-assets` (never merged; nothing else on it), under `pr-<number>/`, and the description
-  links them as `https://raw.githubusercontent.com/njoubert/nimbus-ups-bar/pr-assets/pr-<number>/<file>.png`
-  (the repo is public, so they render). Push them with a worktree so the working branch is not
-  disturbed: `git worktree add <scratch dir> pr-assets`, copy,
-  commit, push, `git worktree remove`. Add the images after `gh pr create` gives the number,
-  then `gh pr edit <n> --body-file …`.
+  branch `pr-assets` (never merged; screenshots and the repo's `.pre-commit-config.yaml`, so its
+  commits pass the hooks like any other), under `pr-<number>/`. Push them with a worktree so the
+  working branch is not disturbed (`git worktree add <scratch dir> pr-assets`, copy, commit, push,
+  `git worktree remove`), then link them by the commit's SHA:
+  `https://raw.githubusercontent.com/njoubert/nimbus-ups-bar/<sha>/pr-<number>/<file>.png` (the
+  repo is public, so they render). Not by the branch name: raw.githubusercontent caches a 404 for
+  minutes, and a SHA link never changes under the PR. Add the images after `gh pr create` gives
+  the number, then `gh pr edit <n> --body-file …`.
 
 ## Layout
 
 ```
 Sources/UpsGuardCore/        the library the tests drive; no AppKit, no IOKit
   Readings.swift             UPSReading (+ flags, self-test), VolumeState, Holder, GuardError
-  Policy.swift               the owner's numbers and choices; normalized; never-quit list
+  Policy.swift               Trigger (time / runtime / charge, whichever first); the policy: three
+                             stages, the power-down action, the UPS-gone choices; never-quit list
   Environment.swift          GuardEnvironment protocol; RehearsalEnvironment (touches nothing,
                              scaled clock, pretends asked apps quit); DrillEnvironment (real
                              actions, scaled clock, never sleeps/shuts down)
   Guard.swift                OutageGuard: the phases, the limits, the owner actions, Status;
                              Duration formatting
-  Simulation.swift           SimulatedOutage: a pretend UPS draining at N× that dies at 0
+  Simulation.swift           SimulatedOutage: a pretend UPS draining at N× that dies at 0, in four
+                             scenarios (drain, shortBattery, upsLostInOutage, upsLostOnLine);
+                             advance() decides when the pretend power comes back
 Sources/NimbusUpsBarKit/     the platform layer, a library so it is testable (AppKit and IOKit
                              allowed; no UI, no Log, no Settings)
   PowerSources.swift         IOPSCopyPowerSourcesInfo + the change notification; monotonicNow()
@@ -96,7 +101,9 @@ Sources/NimbusUpsBar/        the app
   Monitor.swift              UPSMonitor: timers, the merge, samples for the chart, simulations,
                              outage persistence, the arming delay; RealEnvironment (the live
                              GuardEnvironment)
-  Settings.swift             UserDefaults: policy (the optional limits as value + on/off flag),
+  Settings.swift             UserDefaults: policy (each stage's three conditions as value + on/off
+                             flag, "hardRuntime" + "hardRuntimeOn"; migrateLegacyPolicy() copies
+                             the pre-2026-10-11 grace/hard/afterSafe keys over once, keeping them),
                              read intervals, chart span, volume mode and selection, known volumes;
                              every setter posts Settings.didChange
   SettingsWindow.swift       the Settings window: NSTabViewController with toolbar tabs, the four
@@ -110,7 +117,7 @@ Sources/NimbusUpsBar/        the app
   ChartView.swift            load and charge, two panels, time ticks, newest values in the headers,
                              the charge limit, outage bands, hover readout
   AppIcon.swift, DMGBackground.swift, Updates.swift   as in the siblings
-Tests/UpsGuardCoreTests/     47 scenarios against FakeEnvironment
+Tests/UpsGuardCoreTests/     76 scenarios against FakeEnvironment, each rehearsal scenario among them
 Tests/NimbusUpsBarKitTests/  45 checks: the HID decode against Fixtures/cp1500pfclcda.json and
                              hand-made maps, every health rule, the DA dictionary filter, the
                              holder resolver, the merge
@@ -130,17 +137,18 @@ main.
 
 ```
 ./build.sh run [--fg]         debug build as dist/debug/Nimbus UPS Bar.app (quits any running copy first)
-./build.sh test               swift test: the 47 guard scenarios and the 45 platform checks
+./build.sh test               swift test: the 76 guard scenarios and the 45 platform checks
 ./build.sh install            release → /Applications, register the agent (owner's call), launch
 .build/debug/NimbusUpsBar --print        the UPS, health, every HID field, volumes, holders, policy
 .build/debug/NimbusUpsBar --print-menu   the menu built against the real UPS, as an indented tree
 .build/debug/NimbusUpsBar --watch        readings + the guard's log as they happen (Ctrl-C)
-.build/debug/NimbusUpsBar --simulate     a rehearsal in the terminal (~30 s; touches nothing)
+.build/debug/NimbusUpsBar --simulate [S] a rehearsal in the terminal (~30 s; touches nothing); S is
+                                         drain (default), shortBattery, upsLostInOutage, upsLostOnLine
 .build/debug/NimbusUpsBar --dump-chart P the chart with fake data at menu width → P, P-hover, P-light, P-empty
 .build/debug/NimbusUpsBar --dump-settings D   each Settings pane → D/N-name.png, then the real window
                                          on screen for ~3 s → D/window-N-name.png (the layout check)
 .build/debug/NimbusUpsBar --dump-hid-raw P   every raw HID element value as JSON: the decode fixture
-.build/debug/NimbusUpsBar --after-safe sleep|shutdown   the after-safe action once, at a TTY, after typing it
+.build/debug/NimbusUpsBar --after-safe sleep|shutdown   the power-down action once, at a TTY, after typing it
 ```
 
 `--print-menu` is the way to check the menu without a screen: it calls the same `rebuild()` an
@@ -155,24 +163,33 @@ behaviour through the bundle `build.sh run` makes.
 
 ## How the guard decides (read Guard.swift for the details)
 
-Phases from the first reading on battery: `holding` (grace, default 120 s, nothing touched) →
-`soft` (apps holding files are sent one quit each; a volume unmounts as soon as no app outside
-the never-quit list holds it, or, with `quitTimeoutSeconds` set, once every app holding it was
-asked that long ago; once begun the stage stays begun, a postponement only moves the hard limit)
-→ `hard` (time ≥ 300 s, charge ≤ 50 %, runtime ≤ 10 min, the UPS missing for 10 s,
-shutdown-imminent, or *Unmount Now*: force-unmount everything; the charge and runtime limits are
-optional, the time limit is not) → `safe` (sleep hold released;
-the after-safe action once, only after the grace period, and never while mains is back but not
-yet trusted) → on line power `restoring` (remount what *we* unmounted, retrying every 30 s while
-the disk is attached; a macOS auto-remount counts). Readings are ignored for the first 15 s on
-battery. Everything is force: `smbd` dissents a plain unmount of any volume with a share point on
-it; force still flushes.
+Every acting stage begins on a `Trigger` (`Policy.softAt`, `hardAt`, `powerDownAt`): on battery
+≥ T, runtime ≤ R, charge ≤ C, each optional, **whichever comes first** (`Trigger.reasons`). Charge
+and runtime count only after `ignoreReadingsSeconds` (15 s); postponing moves every time condition
+and no other. `softAt` may be `never` (the stage is skipped); `hardAt` may not (`normalized` puts
+the 5 min back). Phases from the first reading on battery: `holding` (nothing touched) → `soft`
+(apps holding files are sent one quit each; a volume unmounts as soon as no app outside the
+never-quit list holds it, or, with `quitTimeoutSeconds` set, once every app holding it was asked
+that long ago; once begun the stage stays begun) → `hard` (`hardAt`, the UPS gone under
+`upsGoneInOutage = .forceUnmount`, shutdown-imminent, *Unmount Now*, or a pending power-down:
+force-unmount everything) → `safe` (sleep hold released) → on line power `restoring` (remount
+what *we* unmounted, retrying every 30 s while the disk is attached; a macOS auto-remount counts).
+**Power down** (sleep or shut down, `powerDownAction`) is its own stage: `powerDownAt`, or the UPS
+gone with `upsGoneInOutagePowersDown`, sets `powerSince`, which adds "about to …" to the hard
+reasons; the action runs once safe, or `powerDownWait` (60 s) later regardless. With
+`powerDownWhenSafe` it also runs on reaching safe, but only once an unmount stage was due, so a
+blip with nothing mounted cannot sleep the Mac. Never while standing down, never in a drill, once
+per outage. **The UPS gone on line power** (`upsGoneOnLine`, only once a UPS has been seen):
+`.notify` notifies once per loss; `.unmount` starts a *blind* outage (`Status.blind`) that forces
+the volumes at once, never powers down, and ends like any other once the UPS is back on line power
+(a reading on battery turns it into a real outage). Everything is force: `smbd` dissents a plain
+unmount of any volume with a share point on it; force still flushes.
 
 The debounces, all found by the 2026-10-10 review: **line power must stay back for
 `Policy.lineStableSeconds` (30 s)** before `endOutage`; until then the outage continues, the
 limits are judged against the last reading on battery, and the headline counts down. A brownout
 that transfers every few seconds therefore reaches the limits instead of resetting them. **The
-UPS must be absent for `absentDebounce` (10 s)** before "gone" is a hard reason; a one-tick
+UPS must be absent for `Policy.upsGoneSeconds` (10 s)** before it counts as gone; a one-tick
 absence is a USB re-enumeration. **The sleep hold is evaluated every tick** from whether anything
 is mounted, so a volume that appears mid-outage (or after a relaunch, when Disk Arbitration's
 replay lands after the first tick) gets it. **A failed unmount backs off `unmountRetry` (10 s)**

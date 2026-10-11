@@ -14,7 +14,7 @@ enum CLI {
     enum Command {
         case print
         case watch
-        case simulate
+        case simulate(scenario: SimulatedOutage.Scenario)
         case holders(path: String)
         case volumes
         case checkUpdate
@@ -50,10 +50,10 @@ enum CLI {
             return 0
 
         case .afterSafe(let action):
-            // The two after-safe actions have no other path to be exercised: the drill never
+            // The two power-down actions have no other path to be exercised: the drill never
             // performs them and a real outage is the wrong time to find out. Keyboard only.
             guard isatty(0) != 0, isatty(1) != 0 else { fputs("--after-safe needs a terminal\n", stderr); return 2 }
-            let what: Policy.AfterSafe
+            let what: Policy.MacAction
             switch action.lowercased() {
             case "sleep": what = .sleep
             case "shutdown", "shut-down": what = .shutDown
@@ -181,13 +181,13 @@ enum CLI {
             RunLoop.main.run()
             return 0
 
-        case .simulate:
+        case .simulate(let scenario):
             let m = UPSMonitor()
             Log.shared.echoToStderr = true
             Log.shared.persistToFile = true
             m.start()
             spin(1.5)
-            m.startRehearsal()
+            m.startRehearsal(scenario)
             var lastPhase: OutageGuard.Phase?
             m.onChange = {
                 guard let sim = m.simulation else { return }

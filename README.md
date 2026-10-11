@@ -43,22 +43,34 @@ when no UPS is connected (add the load in watts in Settings › Readings). Durin
 the icon turns orange with the UPS charge and a countdown to the next step, red while forcing,
 green with a shield once the drives are safe, blue while remounting.
 
-**The stages**, timed from the first reading on battery:
+**The stages**, timed from the first reading on battery. Each of the three that act (closing
+apps, unmounting, sleep or shut down) begins at whichever of its conditions comes first: **time on
+battery**, **runtime left** at or below a figure, **charge** at or below a percent. Every condition
+can be ticked or not, in any combination; the forced unmount needs at least one.
 
-| Stage | When | What happens |
+| Stage | When (defaults) | What happens |
 |---|---|---|
-| **On battery** | Transfer | A notification with charge and runtime. The Mac is held awake (the "UPS Power" power profile would sleep it after a minute). Nothing is touched: a flicker of under the grace period only produces this. Power that comes back has to stay back for 30 s before the outage is over (the headline counts it down); under a brownout that transfers every few seconds the clock and the limits keep running, judged against the last reading on battery. |
-| **Closing apps** | Grace period over (default 2 min) | Every app with files open on a protected volume is sent a quit event, the same thing as its Quit menu, so it saves or shows its own unsaved-changes dialog. Daemons (`smbd`, Spotlight, Backblaze) are left alone. As soon as no app holds a volume, that volume is unmounted. With a quit timeout set (off by default), an app still holding its volume that long after the ask has the volume unmounted anyway. |
-| **Unmounting** | Hard limit: default 5 min on battery (always on), or charge at or below 50 %, or runtime at or below 10 min (either can be turned off), or the UPS missing for 10 s (a USB re-enumeration drops it for a moment; that is not the battery dying), or *Unmount Now* | Every protected volume is force-unmounted whether or not an app still holds it. Force only overrides dissenters and open files; the filesystem is flushed completely either way. A volume that still refuses is retried every 10 s, and you are told once. |
-| **Drives safe** | Everything unmounted | The sleep hold is released. Optionally the Mac is put to sleep or shut down. |
+| **On battery** | Transfer | A notification with charge and runtime. The Mac is held awake (the "UPS Power" power profile would sleep it after a minute). Nothing is touched: a flicker shorter than the first stage only produces this. Power that comes back has to stay back for 30 s before the outage is over (the headline counts it down); under a brownout that transfers every few seconds the clock and the stages keep running, judged against the last reading on battery. |
+| **Closing apps** | 2 min on battery | Every app with files open on a protected volume is sent a quit event, the same thing as its Quit menu, so it saves or shows its own unsaved-changes dialog. Daemons (`smbd`, Spotlight, Backblaze) are left alone. As soon as no app holds a volume, that volume is unmounted. With a quit timeout set (off by default), an app still holding its volume that long after the ask has the volume unmounted anyway. With no condition ticked the stage is skipped and the volumes wait for the force. |
+| **Unmounting** | 5 min on battery, 10 min runtime or 50 % charge; also the UPS missing (below), the UPS's shutdown-imminent flag, or *Unmount Now* | Every protected volume is force-unmounted whether or not an app still holds it. Force only overrides dissenters and open files; the filesystem is flushed completely either way. A volume that still refuses is retried every 10 s, and you are told once. |
+| **Drives safe** | Everything unmounted | The sleep hold is released. |
+| **Sleep or shut down** | Off; any of the three conditions, or as soon as the drives are safe | The volumes are force-unmounted first, then the Mac is put to sleep or shut down, once per outage. If a volume will not come off, the Mac goes down a minute later anyway (macOS unmounts what it can on the way). Never while power is back but not yet trusted. |
 | **Remounting** | Power back | Whatever the guard unmounted is mounted again, if the disk is still attached. If the enclosure rebooted, macOS mounts it itself and the guard notices. |
 
+**If the UPS goes missing from USB** for 10 s (shorter is a re-enumeration, not a lost UPS):
+during an outage it usually means its battery ran flat, so the default is to force-unmount
+everything at once; the alternative carries on counting the stages' time against the last reading,
+and either can also sleep or shut the Mac down. On line power (a pulled cable, a UPS switched off)
+an outage would go unseen: the default is a notification; *Nothing* is silent, and *Notify and
+unmount everything* forces the volumes off and remounts them when the UPS is back. Only a UPS that
+was seen counts: a Mac with none never hears about it.
+
 While an outage runs, the top of the menu offers **Unmount Now**, **Postpone** (5 min by default;
-the charge and runtime limits still apply: postponing cannot talk the battery into lasting longer)
-and **Don't Quit Apps This Outage**. Readings in the first 15 s on battery are ignored, because
-some UPSes report 0 % for a moment at the transfer. A relaunch mid-outage (a crash restart by the
-agent, an update, toggling *Run in Background*) carries the outage's clock on rather than
-starting the grace period again.
+it moves every time condition; the charge and runtime conditions still apply: postponing cannot
+talk the battery into lasting longer) and **Don't Quit Apps This Outage**. Readings in the first
+15 s on battery are ignored, because some UPSes report 0 % for a moment at the transfer. A relaunch
+mid-outage (a crash restart by the agent, an update, toggling *Run in Background*) carries the
+outage's clock on rather than starting it again.
 
 **In the dropdown.** First the headline: the stage, what comes next and when, and three figures:
 charge, load in watts, runtime (the UPS's own estimate at the current load). Top right, how old
@@ -77,7 +89,10 @@ any moment. Then:
 - **UPS Details**: every field the UPS reports over USB HID, grouped by battery, input and output,
   plus the entry macOS keeps for it (`pmset -g ps`) and the Mac's own battery. Click any row to copy.
 - **Simulate an Outage**: a **rehearsal** (a pretend outage at 10× speed against the real volumes
-  and the real apps holding them; it logs what it would do and touches nothing) and a **drill** (the
+  and the real apps holding them, under the current policy; it logs what it would do and touches
+  nothing), in four scenarios: the battery draining, a short battery (so the runtime and charge
+  conditions fire before the time ones), the UPS lost mid-outage, and the UPS lost on line power;
+  and a **drill** (the
   same pretend outage at 5× with real quits, real unmounts and real remounts; it never sleeps or
   shuts down the Mac, and a real outage abandons it).
 - **Recent Events** and *Open Log File*: every decision, reading and action, timestamped, in
@@ -88,19 +103,21 @@ any moment. Then:
 
 **Settings.** Four panes; every change applies at once.
 
-- **Outage**: the policy. The wait before anything happens; whether apps are asked to quit and,
-  optionally, how long they get before their volume is unmounted anyway; the time limit (always
-  on) and the charge and runtime limits (each can be turned off; the charge gauge on this UPS is
-  voltage-derived, see below); how long readings are ignored after the transfer; how long power
-  must stay back before the outage is over; what to do once the drives are safe (keep running,
-  sleep, shut down); and the apps never asked to quit, picked from the running apps or typed as a
-  bundle id or name. Durations are typed as written everywhere else: `90 s`, `2 min`, `1 h 30 min`.
+- **Outage**: the policy. A grid of the three stages (ask apps to quit, force unmount, sleep or
+  shut down) by the three conditions (time on battery, runtime left, charge), each a checkbox and a
+  figure (the charge gauge on this UPS is voltage-derived, see below); whether apps are asked to
+  quit and, optionally, how long they get before their volume is unmounted anyway; sleep or shut
+  down, and whether also as soon as the drives are safe; what a missing UPS means, during an outage
+  and on line power, and after how long; and the apps never asked to quit, picked from the running
+  apps or typed as a bundle id or name. Durations are typed as written everywhere else: `90 s`,
+  `2 min`, `1 h 30 min`.
 - **Volumes**: all external volumes (the default), or only the ones you check. Volumes seen before
   but not attached now stay in the list. Disk images and the EFI and boot helper partitions never
   count as external.
 - **Readings**: how often the UPS is read on line power (10 s) and on battery, in a simulation and
-  with the menu open (2 s; also the guard's clock); how much history the chart shows (30 min to
-  24 h); the load in the menu bar.
+  with the menu open (2 s; also the guard's clock); how long charge and runtime are ignored after
+  the transfer and how long power must stay back before an outage is over; how much history the
+  chart shows (30 min to 24 h); the load in the menu bar.
 - **General**: run in the background at login, notifications, automatic update checks, what
   *Postpone* adds, the log.
 
@@ -136,11 +153,12 @@ hosts it ever talks to.
    back.
 3. **Choose the volumes** (Settings › Volumes). *All external volumes* is right for a desk where
    everything external is on the UPS. Otherwise check the ones that are.
-4. **Set the policy** (Settings › Outage). The defaults (2 min grace, 5 min / 50 % / 10 min hard
-   limits, ask apps to quit with no timeout, keep running afterwards) suit a UPS with an hour or
-   more of runtime. With a heavy load and a short runtime, shorten the grace period; if an app
-   that hangs on Quit worries you more than losing its unsaved work, give the apps a timeout.
-5. **Rehearse.** *Simulate an Outage › Rehearse*: watch the menu and the log walk through the
+4. **Set the policy** (Settings › Outage). The defaults (ask apps at 2 min; force at 5 min, 10 min
+   runtime or 50 %; no timeout for the apps; keep running afterwards) suit a UPS with an hour or
+   more of runtime. With a heavy load and a short runtime, tick the runtime condition on the first
+   stage too; if an app that hangs on Quit worries you more than losing its unsaved work, give the
+   apps a timeout.
+5. **Rehearse.** *Simulate an Outage*, each scenario: watch the menu and the log walk through the
    stages in about half a minute without touching anything.
 6. **Drill**, with your work saved: the same with real unmounts. The volumes come back by
    themselves at the end.
@@ -170,9 +188,9 @@ hosts it ever talks to.
   renderer) gets its parent asked. Executables under `/System` are never apps to it.
 - `Sources/NimbusUpsBar/Monitor.swift` ties it together on a timer (HID every 10 s on line power,
   every 2 s on battery; both from Settings), keeps the chart's samples, and runs simulations.
-- `swift test` runs 47 outage scenarios against a fake desk (flapping mains, a UPS that drops off
-  USB for a moment, a relaunch mid-outage, a volume that refuses to unmount, two volumes landing
-  at different times, …) and 45 checks of the platform layer against fixtures, among them a raw
+- `swift test` runs 76 outage scenarios against a fake desk (flapping mains, a UPS that drops off
+  USB for a moment or for good, a relaunch mid-outage, a volume that refuses to unmount, two volumes
+  landing at different times, each stage on each condition, every rehearsal scenario end to end, …) and 45 checks of the platform layer against fixtures, among them a raw
   dump of the CP1500's 58 HID elements, so the decode, the health rules and the volume filter are
   checked in CI with no hardware attached.
 
@@ -182,11 +200,12 @@ The command line has the same readers and the same guard with no UI:
 .build/debug/NimbusUpsBar --print          everything the menu would show, as text
 .build/debug/NimbusUpsBar --print-menu     the menu itself, built against the real UPS, as a tree
 .build/debug/NimbusUpsBar --watch          readings and the guard's log as they happen
-.build/debug/NimbusUpsBar --simulate       a rehearsal in the terminal
+.build/debug/NimbusUpsBar --simulate [drain|shortBattery|upsLostInOutage|upsLostOnLine]
+                                           a rehearsal in the terminal
 .build/debug/NimbusUpsBar --holders /Volumes/Flitslig
 .build/debug/NimbusUpsBar --volumes
 .build/debug/NimbusUpsBar --dump-hid-raw cp1500.json   every raw HID element value, as the decode's fixture
-.build/debug/NimbusUpsBar --after-safe sleep           the after-safe action, once, after a typed confirmation
+.build/debug/NimbusUpsBar --after-safe sleep           sleep (or shutdown), once, after a typed confirmation
 ```
 
 ## Platform facts it rests on
@@ -233,13 +252,14 @@ at the keyboard, with nothing important open on the drives.
 2. **Pull the plug** with the log open: transfer within seconds, the stages at the times the
    policy says, the remount 30 s after power returns.
 3. **Pull the USB cable** 30 s into a plug-pull: the headline says "UPS not answering" and nothing
-   is unmounted; leave it out and after 10 s everything is, as if the battery had died.
+   is unmounted; leave it out and after 10 s everything is, as if the battery had died. Then once
+   on line power: a "UPS not seen" notification after 10 s.
 4. **Flap it**: plug the wall lead back in for 10 s during a plug-pull, then pull it again. One
    "Power outage" notification, no "Power restored", the clock keeps counting.
 5. **A browser holding a file on the drive** during a drill (a download in progress, a file open
    from it): the browser itself is asked to quit, not one of its helper processes.
 6. ***Unmount Now*** from the menu during a drill.
-7. **The after-safe action.** `--after-safe sleep` and `--after-safe shutdown` from a terminal,
+7. **Sleep and shut down.** `--after-safe sleep` and `--after-safe shutdown` from a terminal,
    each once: both ask for a typed confirmation. For shutdown, watch whether macOS puts up an
    Automation prompt for `loginwindow` the first time; if it does, approve it, because unattended
    that prompt would be a silent no-op. Neither has been run on this desk yet.
