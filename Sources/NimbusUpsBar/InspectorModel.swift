@@ -162,7 +162,7 @@ final class InspectorModel {
             "automaticUpdateChecks": Inspector.value(updater?.automaticChecks), "logFile": Log.fileURL.path,
         ]
         let sub = "\(BackgroundAgent.statusDescription) · \(byLaunchd ? "started by launchd" : "not started by launchd") · \(installed ? "/Applications" : "development build")"
-        return Inspector.Section(id: "agent", title: "Agent & App", symbol: "gearshape.2", rows: rows, json: json, subtitle: sub)
+        return Inspector.Section(id: "agent", title: "Service & App", symbol: "gearshape.2", rows: rows, json: json, subtitle: sub)
     }
 
     /// `launchctl print` runs a process; off the main thread, at most every ten seconds.
