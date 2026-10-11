@@ -123,6 +123,26 @@ final class GuardTests: XCTestCase {
         XCTAssertTrue(env.awake.isEmpty)
     }
 
+    func testRefreshHoldersShowsThemOnLinePowerAndKeepsTheStandDown() {
+        // The Inspector's Volumes page: on line power the guard never looks, so it asks.
+        env.add(flitslig, holders: [lightroom, smbd])
+        guardian.tick(ac())
+        XCTAssertTrue(guardian.status.volumes[0].appHolders.isEmpty, "the guard does not look on line power")
+        guardian.refreshHolders()
+        XCTAssertEqual(guardian.status.volumes[0].appHolders.map(\.pid), [100])
+        XCTAssertEqual(guardian.status.volumes[0].otherHolders.map(\.pid), [200])
+        // Asked mid-stand-down, it leaves the countdown and the phase alone.
+        onBattery(until: 45)
+        run(ac(), for: 5)
+        let until = guardian.status.untilStandDown
+        guardian.refreshHolders()
+        XCTAssertNotNil(until)
+        XCTAssertEqual(guardian.status.untilStandDown, until)
+        XCTAssertEqual(guardian.status.phase, .holding)
+        XCTAssertTrue(env.unmounts.isEmpty)
+        XCTAssertTrue(env.quits.isEmpty)
+    }
+
     func testBlipOnlyNotifies() {
         env.add(flitslig, holders: [lightroom, smbd])
         guardian.tick(ac())

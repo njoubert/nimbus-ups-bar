@@ -66,6 +66,20 @@ public final class VolumeRegistry {
         onChange?()
     }
 
+    /// Which volumes the guard protects (and the menu and the Inspector list). With every
+    /// external volume protected, only the attached ones: a drive seen once and since ejected
+    /// is remembered for the Settings checklist, nothing more. With a chosen few, those, attached
+    /// or not, so a chosen drive that is missing shows as missing.
+    public nonisolated static func protects(_ v: VolumeState, allExternal: Bool, selected: Set<String>) -> Bool {
+        allExternal ? v.isAttached : selected.contains(v.uuid)
+    }
+
+    /// A remembered volume worth keeping: not a disk image (remembered before they were
+    /// filtered out, the iOS Simulator's runtime images among them).
+    public nonisolated static func keepRemembered(detail: String) -> Bool {
+        !detail.contains("Virtual Interface")
+    }
+
     /// A `VolumeState` for an external, mountable volume; nil for everything else.
     public nonisolated static func state(from d: [String: Any]) -> VolumeState? {
         guard let uuid = volumeUUID(d[kDADiskDescriptionVolumeUUIDKey as String]) else { return nil }

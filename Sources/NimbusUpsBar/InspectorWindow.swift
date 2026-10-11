@@ -142,6 +142,8 @@ final class InspectorWindowController: NSWindowController, NSWindowDelegate {
         visibilityTimer = nil
         model.monitor.inspectorOpen = false
         model.monitor.inspectorVisible = false
+        model.reset()
+        sidebar.reload()
     }
 }
 

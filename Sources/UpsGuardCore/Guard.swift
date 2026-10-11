@@ -397,13 +397,14 @@ public final class OutageGuard {
         tick(lastReading)
     }
 
-    /// Re-read who holds the protected volumes (for the menu), outside the phases that do it
-    /// on their own.
+    /// Re-read who holds the protected volumes (for the Inspector), outside the phases that do
+    /// it on their own: on line power and while holding the guard never looks.
     public func refreshHolders() {
         let now = env.now
         let volumes = env.protectedVolumes()
         refreshHolders(volumes.filter(\.isMounted), now: now)
-        publish(now: now, volumes: volumes, standingDown: false, absentFor: absentSince.map { now - $0 })
+        let standingDown = outageStart != nil && lineSince.map { now - $0 < policy.lineStableSeconds } == true
+        publish(now: now, volumes: volumes, standingDown: standingDown, absentFor: absentSince.map { now - $0 })
     }
 
     // MARK: Transitions

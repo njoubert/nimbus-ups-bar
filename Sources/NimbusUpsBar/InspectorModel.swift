@@ -35,9 +35,17 @@ final class InspectorModel {
 
     /// Take a new look. Rows that differ from the previous look are logged as changes and
     /// stamped for the flash; the first look sets the baseline and logs nothing.
+    private var holdersCheckedAt: Date?
+
     func refresh() {
         let now = Date()
         if launchd.checkedAt.map({ now.timeIntervalSince($0) > 10 }) ?? true { checkLaunchd() }
+        // The guard looks at who holds the volumes only in its soft and hard stages; the
+        // Volumes page asks for a fresh look (~60 ms a volume) at most every 5 s.
+        if holdersCheckedAt.map({ now.timeIntervalSince($0) >= 5 }) ?? true {
+            monitor.live.refreshHolders()
+            holdersCheckedAt = now
+        }
         sections = build()
         var flat = Inspector.flatten(sections)
         let full = monitor.hidRaw?.reports != nil
@@ -60,6 +68,15 @@ final class InspectorModel {
     }
 
     func clearChanges() { changes = [] }
+
+    /// The window closed: Changes is "since the Inspector opened", so the next opening starts
+    /// from nothing (and its first look is the baseline, not a diff against the last session).
+    func reset() {
+        changes = []
+        changedAt = [:]
+        last = nil
+        lastFull = nil
+    }
 
     /// The log file's last lines, parsed: Events reads these rather than this process's ring,
     /// so it reaches back across relaunches and includes the command-line runs. Re-read only
