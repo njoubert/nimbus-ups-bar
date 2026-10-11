@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Weekly: the update-health job asks about the published release, which can go wrong
+  # (a deleted asset, a re-signed build) without anybody pushing a commit.
+  schedule:
+    - cron: "41 14 * * 1"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift --version
+      - name: Build
+        run: swift build
+      - name: Test the outage state machine and the platform layer
+        # UpsGuardCore: the guard's scenarios against the fake desk. NimbusUpsBarKit: the
+        # HID decode against the committed CP1500 fixture, the health rules, the Disk
+        # Arbitration filter, the holder resolver, the IOKit+HID merge. No UPS needed.
+        run: swift test
+      - name: Smoke-run the command line with no UPS attached
+        # The runner has no UPS, no external disk and no window server; every command must
+        # still exit 0. --print-menu builds every submenu (headless: no status item), so a
+        # crash in menu code is caught without a screen; --simulate walks the whole rehearsal
+        # with the pretend UPS (about 30 s).
+        env:
+          NIMBUS_UPS_TRACE: 1
+        run: |
+          bin=.build/debug/NimbusUpsBar
+          run() { perl -e 'alarm shift; exec @ARGV' 180 "$@"; }
+          run "$bin" --print
+          run "$bin" --volumes
+          run "$bin" --print-menu
+          run "$bin" --agent-status || true
+          run "$bin" --simulate
+      - name: Build release
+        run: swift build -c release
+
+  # Signing lives on the owner's machine, so CI cannot run the full preflight (it needs a
+  # Developer ID build). It can ask the other half: does what this source declares still match
+  # what is actually published? A pull request that changes the bundle identifier or the team
+  # would strand every installed copy on the release they have — silently, forever.
+  # `continue-on-error` until the first release exists; drop it once v1.0.0 is published.
+  update-health:
+    runs-on: macos-15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out the updater
+        uses: actions/checkout@v4
+        with:
+          repository: njoubert/nimbus-updater
+          path: .updater
+      - name: Read the identity this source declares
+        id: declared
+        run: |
+          bundle_id=$(grep -m1 '^BUNDLE_ID=' build.sh | cut -d= -f2)
+          team=$(grep -m1 'static let teamID' Sources/NimbusUpsBar/Updates.swift | cut -d'"' -f2)
+          name=$(grep -m1 '^APP_NAME=' build.sh | cut -d'"' -f2)
+          prefix=$(grep -m1 '^NAME=' build.sh | cut -d= -f2 | awk '{print $1}')
+          echo "bundle_id=$bundle_id" >> "$GITHUB_OUTPUT"
+          echo "team=$team" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "prefix=$prefix-" >> "$GITHUB_OUTPUT"
+          echo "declared: $bundle_id / $team / $name / $prefix-"
+      - name: The published release must still carry an installable zip
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          swift run --package-path .updater updaterctl check \
+            --repo "$GITHUB_REPOSITORY" --prefix "${{ steps.declared.outputs.prefix }}" --require-asset
+      - name: The published release must match the identity this source declares
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          swift run --package-path .updater updaterctl released-identity \
+            --repo "$GITHUB_REPOSITORY" --app-name "${{ steps.declared.outputs.name }}" \
+            --prefix "${{ steps.declared.outputs.prefix }}" \
+            --expect-bundle-id "${{ steps.declared.outputs.bundle_id }}" \
+            --expect-team "${{ steps.declared.outputs.team }}"
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shellcheck
+        run: shellcheck build.sh

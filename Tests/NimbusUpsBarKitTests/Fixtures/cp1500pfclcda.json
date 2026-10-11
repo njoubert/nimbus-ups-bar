@@ -1,0 +1,356 @@
+{
+  "manufacturer" : "CPS",
+  "product" : "CP1500PFCLCDa",
+  "readMillis" : 22,
+  "serial" : "CXXRS7004368",
+  "values" : [
+    {
+      "page" : 133,
+      "section" : 36,
+      "usage" : 208,
+      "value" : 1
+    },
+    {
+      "page" : 133,
+      "section" : 36,
+      "usage" : 68,
+      "value" : 0
+    },
+    {
+      "page" : 133,
+      "section" : 36,
+      "usage" : 69,
+      "value" : 0
+    },
+    {
+      "page" : 133,
+      "section" : 36,
+      "usage" : 66,
+      "value" : 0
+    },
+    {
+      "page" : 133,
+      "section" : 36,
+      "usage" : 70,
+      "value" : 1
+    },
+    {
+      "page" : 133,
+      "section" : 36,
+      "usage" : 67,
+      "value" : 0
+    },
+    {
+      "page" : 133,
+      "section" : 36,
+      "usage" : 102,
+      "value" : 100
+    },
+    {
+      "page" : 133,
+      "section" : 36,
+      "usage" : 104,
+      "value" : 8125
+    },
+    {
+      "page" : 133,
+      "section" : 36,
+      "usage" : 42,
+      "value" : 300
+    },
+    {
+      "page" : 132,
+      "section" : 36,
+      "usage" : 90,
+      "value" : 2
+    },
+    {
+      "page" : 132,
+      "section" : 36,
+      "usage" : 254,
+      "value" : 1
+    },
+    {
+      "page" : 132,
+      "section" : 36,
+      "usage" : 255,
+      "value" : 2
+    },
+    {
+      "page" : 65281,
+      "section" : 36,
+      "usage" : 208,
+      "value" : 5
+    },
+    {
+      "page" : 133,
+      "section" : 36,
+      "usage" : 137,
+      "value" : 4
+    },
+    {
+      "page" : 133,
+      "section" : 36,
+      "usage" : 143,
+      "value" : 3
+    },
+    {
+      "page" : 133,
+      "section" : 36,
+      "usage" : 139,
+      "value" : 1
+    },
+    {
+      "page" : 133,
+      "section" : 36,
+      "usage" : 44,
+      "value" : 2
+    },
+    {
+      "page" : 133,
+      "section" : 36,
+      "usage" : 131,
+      "value" : 100
+    },
+    {
+      "page" : 133,
+      "section" : 36,
+      "usage" : 141,
+      "value" : 5
+    },
+    {
+      "page" : 133,
+      "section" : 36,
+      "usage" : 142,
+      "value" : 10
+    },
+    {
+      "page" : 133,
+      "section" : 36,
+      "usage" : 140,
+      "value" : 20
+    },
+    {
+      "page" : 133,
+      "section" : 36,
+      "usage" : 41,
+      "value" : 10
+    },
+    {
+      "page" : 133,
+      "section" : 36,
+      "usage" : 103,
+      "value" : 100
+    },
+    {
+      "page" : 132,
+      "section" : 36,
+      "usage" : 64,
+      "value" : 240
+    },
+    {
+      "page" : 132,
+      "section" : 36,
+      "usage" : 48,
+      "value" : 272
+    },
+    {
+      "page" : 132,
+      "section" : 36,
+      "usage" : 253,
+      "value" : 3
+    },
+    {
+      "page" : 132,
+      "section" : 26,
+      "usage" : 64,
+      "value" : 120
+    },
+    {
+      "page" : 132,
+      "section" : 26,
+      "usage" : 48,
+      "value" : 124
+    },
+    {
+      "page" : 132,
+      "section" : 28,
+      "usage" : 110,
+      "value" : 0
+    },
+    {
+      "page" : 132,
+      "section" : 28,
+      "usage" : 101,
+      "value" : 0
+    },
+    {
+      "page" : 132,
+      "section" : 28,
+      "usage" : 83,
+      "value" : 100
+    },
+    {
+      "page" : 132,
+      "section" : 28,
+      "usage" : 84,
+      "value" : 139
+    },
+    {
+      "page" : 132,
+      "section" : 28,
+      "usage" : 88,
+      "value" : 1
+    },
+    {
+      "page" : 132,
+      "section" : 28,
+      "usage" : 52,
+      "value" : 30
+    },
+    {
+      "page" : 132,
+      "section" : 28,
+      "usage" : 51,
+      "value" : 55
+    },
+    {
+      "page" : 65281,
+      "section" : 28,
+      "usage" : 67,
+      "value" : 1
+    },
+    {
+      "page" : 132,
+      "section" : 28,
+      "usage" : 48,
+      "value" : 124
+    },
+    {
+      "page" : 132,
+      "section" : 28,
+      "usage" : 53,
+      "value" : 3
+    },
+    {
+      "page" : 132,
+      "section" : 28,
+      "usage" : 87,
+      "value" : -1
+    },
+    {
+      "page" : 132,
+      "section" : 28,
+      "usage" : 86,
+      "value" : -1
+    },
+    {
+      "page" : 132,
+      "section" : 28,
+      "usage" : 68,
+      "value" : 1000
+    },
+    {
+      "page" : 132,
+      "section" : 28,
+      "usage" : 67,
+      "value" : 1500
+    },
+    {
+      "page" : 65281,
+      "section" : 0,
+      "usage" : 187,
+      "value" : 0
+    },
+    {
+      "page" : 65281,
+      "section" : 0,
+      "usage" : 188,
+      "value" : 0
+    },
+    {
+      "page" : 65281,
+      "section" : 0,
+      "usage" : 189,
+      "value" : 0
+    },
+    {
+      "page" : 65281,
+      "section" : 0,
+      "usage" : 33,
+      "value" : 0
+    },
+    {
+      "page" : 65281,
+      "section" : 0,
+      "usage" : 32,
+      "value" : 0
+    },
+    {
+      "page" : 65281,
+      "section" : 0,
+      "usage" : 1,
+      "value" : 0
+    },
+    {
+      "page" : 65281,
+      "section" : 0,
+      "usage" : 2,
+      "value" : 1
+    },
+    {
+      "page" : 65281,
+      "section" : 0,
+      "usage" : 16,
+      "value" : 0
+    },
+    {
+      "page" : 65281,
+      "section" : 0,
+      "usage" : 30,
+      "value" : 0
+    },
+    {
+      "page" : 65281,
+      "section" : 0,
+      "usage" : 31,
+      "value" : 0
+    },
+    {
+      "page" : 65281,
+      "section" : 0,
+      "usage" : 19,
+      "value" : 0
+    },
+    {
+      "page" : 65281,
+      "section" : 0,
+      "usage" : 20,
+      "value" : 0
+    },
+    {
+      "page" : 65281,
+      "section" : 0,
+      "usage" : 22,
+      "value" : 0
+    },
+    {
+      "page" : 65281,
+      "section" : 0,
+      "usage" : 24,
+      "value" : 0
+    },
+    {
+      "page" : 65281,
+      "section" : 0,
+      "usage" : 21,
+      "value" : 0
+    },
+    {
+      "page" : 65281,
+      "section" : 0,
+      "usage" : 23,
+      "value" : 0
+    }
+  ]
+}
