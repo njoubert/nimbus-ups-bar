@@ -151,4 +151,73 @@ final class HIDDecodeTests: XCTestCase {
         let data = try JSONEncoder().encode(original)
         XCTAssertEqual(try JSONDecoder().decode(UPSHID.RawReport.self, from: data), original)
     }
+
+    // MARK: The full capture
+
+    func testFullCaptureCarriesEverythingTheDeviceReturned() throws {
+        let raw = try fixture("cp1500pfclcda-full")
+        XCTAssertEqual(raw.values.count, 158)
+        XCTAssertTrue(raw.values.allSatisfy { $0.cookie != nil && $0.type != nil && $0.reportID != nil })
+        XCTAssertEqual(Set(raw.values.compactMap(\.cookie)).count, raw.values.count, "one entry per element")
+        XCTAssertTrue(raw.values.filter { $0.error == nil }.allSatisfy { $0.bytes != nil }, "a value read comes with its bytes")
+        XCTAssertEqual(raw.collections?.count, 10)
+        XCTAssertEqual(raw.reports?.count, 76)
+        XCTAssertEqual(raw.descriptor?.count, 726 * 2)
+        XCTAssertEqual(raw.properties?["VendorID"], "1892", "CyberPower, 0x0764")
+        XCTAssertEqual(raw.properties?["Product"], "CP1500PFCLCDa")
+        // The feature report the self-test writes to, as the device returned it: id 20, value 1 (passed).
+        XCTAssertEqual(raw.reports?.first { $0.type == "feature" && $0.id == 20 }?.bytes, "1401")
+    }
+
+    func testFullCaptureDecodesExactlyLikeTheOldElementList() throws {
+        // Before the capture kept everything, the element list held only feature and input
+        // elements, the first of each (section, page, usage). The decode must not notice.
+        let full = try fixture("cp1500pfclcda-full")
+        var seen = Set<UPSHID.Key>()
+        var old: [UPSHID.RawReport.Value] = []
+        for v in full.values where v.error == nil && ["feature", "input-misc", "input-button"].contains(v.type ?? "") {
+            let k = UPSHID.Key(section: v.section, page: v.page, usage: v.usage)
+            if seen.insert(k).inserted { old.append(UPSHID.RawReport.Value(section: v.section, page: v.page, usage: v.usage, value: v.value)) }
+        }
+        let reduced = UPSHID.RawReport(product: full.product, manufacturer: full.manufacturer, serial: full.serial, values: old)
+        let a = UPSHID.decode(full, now: 0), b = UPSHID.decode(reduced, now: 0)
+        XCTAssertEqual(a.reading, b.reading)
+        XCTAssertEqual(a.fields, b.fields)
+        XCTAssertEqual(a.fields.count, 53)
+        let r = UPSHID.decode(full, now: 0).reading
+        XCTAssertEqual(r.name, "CP1500PFCLCDa")
+        XCTAssertEqual(r.ratedWatts, 1000)
+        XCTAssertFalse(r.onBattery)
+    }
+
+    func testDecodeSkipsFailedReadsOutputsAndPadding() {
+        func v(_ page: UInt32, _ usage: UInt32, _ value: Int, type: String, error: Int32? = nil) -> UPSHID.RawReport.Value {
+            var x = UPSHID.RawReport.Value(section: 0x24, page: page, usage: usage, value: value)
+            x.type = type; x.error = error
+            return x
+        }
+        let raw = UPSHID.RawReport(product: "X", manufacturer: nil, serial: nil, values: [
+            v(0x85, 0x66, 0, type: "feature", error: -536850432),   // failed: not a 0 % charge
+            v(0x85, 0x66, 7, type: "output"),                        // an output: not a reading
+            v(0x85, 0x66, 9, type: "input-null"),                    // padding: not a reading
+            v(0x85, 0x66, 81, type: "feature"),                      // the reading
+            v(0x85, 0x66, 12, type: "input-misc"),                   // a repeat: the first stands
+        ])
+        XCTAssertEqual(UPSHID.decode(raw, now: 0).reading.chargePercent, 81)
+    }
+
+    func testDevicePropertiesAreOneLineAndParseBack() throws {
+        XCTAssertEqual(UPSHID.propertyText("CP1500PFCLCDa"), "CP1500PFCLCDa")
+        XCTAssertEqual(UPSHID.propertyText(NSNumber(value: 1892)), "1892")
+        XCTAssertEqual(UPSHID.propertyText(kCFBooleanTrue as Any), "true")
+        XCTAssertEqual(UPSHID.propertyText(Data([0x05, 0x84])), "0584")
+        let nested: [Any] = [["DeviceUsagePage": 132, "DeviceUsage": 4], ["Blob": Data([0xAB])]]
+        XCTAssertEqual(UPSHID.propertyText(nested), #"[{"DeviceUsage":4,"DeviceUsagePage":132},{"Blob":"ab"}]"#)
+        // The captured device: no property spans lines, and the nested ones are JSON.
+        let raw = try fixture("cp1500pfclcda-full")
+        let props = try XCTUnwrap(raw.properties)
+        XCTAssertTrue(props.values.allSatisfy { !$0.contains("\n") })
+        let pairs = try XCTUnwrap(props["DeviceUsagePairs"])
+        XCTAssertNotNil(try JSONSerialization.jsonObject(with: Data(pairs.utf8)) as? [Any])
+    }
 }

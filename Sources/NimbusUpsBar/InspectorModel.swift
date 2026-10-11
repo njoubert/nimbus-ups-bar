@@ -21,6 +21,9 @@ final class InspectorModel {
     private(set) var updatedAt = Date()
     private(set) var updates = 0
     private var last: [String: String]?
+    /// Whether the UPS page last showed a full capture: a switch between the routine read and
+    /// the full one adds or drops a hundred rows, which are not changes in the UPS.
+    private var lastFull: Bool?
     private var launchd = LaunchdJob.Info(text: nil, checkedAt: nil)
     private var launchdChecking = false
     nonisolated static let maxChanges = 1000
@@ -36,14 +39,22 @@ final class InspectorModel {
         let now = Date()
         if launchd.checkedAt.map({ now.timeIntervalSince($0) > 10 }) ?? true { checkLaunchd() }
         sections = build()
-        let flat = Inspector.flatten(sections)
-        if let last {
+        var flat = Inspector.flatten(sections)
+        let full = monitor.hidRaw?.reports != nil
+        if var last {
+            if let lastFull, lastFull != full {
+                // Compare the UPS page only on the rows both captures have.
+                let shared = Set(last.keys).intersection(flat.keys)
+                last = last.filter { !$0.key.hasPrefix("ups › ") || shared.contains($0.key) }
+                flat = flat.filter { !$0.key.hasPrefix("ups › ") || shared.contains($0.key) }
+            }
             let diff = Inspector.changes(from: last, to: flat, at: now)
             for c in diff { changedAt[c.section + " › " + c.key] = now }
             changes.insert(contentsOf: diff.reversed(), at: 0)
             if changes.count > InspectorModel.maxChanges { changes.removeLast(changes.count - InspectorModel.maxChanges) }
         }
-        last = flat
+        last = Inspector.flatten(sections)
+        lastFull = full
         updatedAt = now
         updates += 1
     }
@@ -99,6 +110,7 @@ final class InspectorModel {
             Inspector.Row(group: "Cadence", "A HID report counts as fresh for", Duration.text(s.hidFreshFor)),
             Inspector.Row(group: "Cadence", "No HID read is a warning after", Duration.text(s.hidStaleAfter)),
             Inspector.Row(group: "USB HID", "Device attached", m.hid.isAttached ? "yes" : "no"),
+            Inspector.Row(group: "USB HID", "Full HID capture", m.inspectorVisible ? "yes (the Inspector is on screen)" : "no (routine reads only)"),
             Inspector.Row(group: "USB HID", "Last read", ago(m.hidReadAt) + (m.hidReport.map { " in \($0.readMillis) ms" } ?? "")),
             Inspector.Row(group: "USB HID", "Reads", "\(st.hidReads)"),
             Inspector.Row(group: "USB HID", "Reads that returned nothing", "\(st.hidEmpty)"),
@@ -113,7 +125,7 @@ final class InspectorModel {
         let json: [String: Any] = [
             "lineReadSeconds": s.lineReadInterval, "busyReadSeconds": s.busyReadInterval, "currentReadSeconds": m.currentReadInterval,
             "fastReadReasons": reasons, "hidFreshForSeconds": s.hidFreshFor, "hidStaleAfterSeconds": s.hidStaleAfter,
-            "hidAttached": m.hid.isAttached, "hidLastReadAgeSeconds": Inspector.value(m.hidReadAt.map { now - $0 }),
+            "hidAttached": m.hid.isAttached, "hidFullCapture": m.inspectorVisible, "hidLastReadAgeSeconds": Inspector.value(m.hidReadAt.map { now - $0 }),
             "hidReads": st.hidReads, "hidEmpty": st.hidEmpty, "hidAbandoned": st.hidAbandoned, "hidDropped": st.hidDropped,
             "polls": st.polls, "powerSourceEvents": st.powerSourceEvents,
             "lastPowerSourceEventAgeSeconds": Inspector.value(st.lastPowerSourceEventAt.map { now - $0 }),

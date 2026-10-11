@@ -118,32 +118,74 @@ public enum Inspector {
 
     // MARK: Sections the Kit can build
 
-    /// Every element the UPS reported over USB HID: decoded, labelled, and raw.
+    /// Exactly what the UPS returned over USB HID: every element macOS parsed out of the
+    /// report descriptor (each with its metadata, its value as read and its bytes, or the error
+    /// its read returned), and, on a full read, the collections, every report's bytes, the
+    /// descriptor and the device's properties. The table labels the values the decode knows;
+    /// the JSON is the capture itself (`--dump-hid-raw`'s format) beside the decoded reading.
     public static func ups(raw: UPSHID.RawReport?, report: UPSHID.Report?, readAge: TimeInterval?, attached: Bool) -> Section {
         var rows: [Row] = []
         var json: [String: Any] = ["attached": attached]
-        if let report {
-            for f in report.fields {
-                rows.append(Row(group: f.section, f.label, f.value,
-                                detail: "\(hex(f.key.section)) · \(hex(f.key.page))/\(hex(f.key.usage)) = \(f.raw)"))
-            }
-            json["fields"] = report.fields.map { f -> [String: Any] in
-                ["section": f.section, "label": f.label, "value": f.value, "raw": f.raw,
-                 "collection": hex(f.key.section), "page": hex(f.key.page), "usage": hex(f.key.usage)]
-            }
-            json["decoded"] = readingJSON(report.reading)
-            json["readMillis"] = report.readMillis
-        }
         if let raw {
-            json["product"] = value(raw.product)
-            json["manufacturer"] = value(raw.manufacturer)
-            json["serial"] = value(raw.serial)
-            json["rawValues"] = raw.values.map { ["collection": hex($0.section), "page": hex($0.page), "usage": hex($0.usage), "value": $0.value] }
+            var seen: [String: Int] = [:]
+            for v in raw.values {
+                let key = UPSHID.Key(section: v.section, page: v.page, usage: v.usage)
+                let value: String
+                if let e = v.error { value = String(format: "read failed (0x%08X)", UInt32(bitPattern: e)) }
+                else if UPSHID.stringIndexes.contains(key.page << 8 | key.usage) { value = "string slot \(v.value)" }
+                else { value = UPSHID.format(key, v.value) }
+                var d = [v.type ?? "?"]
+                if let c = v.cookie { d.append("cookie \(c)") }
+                if let r = v.reportID { d.append("report \(r)") }
+                d.append("\(hex(v.section)) · \(hex(v.page))/\(hex(v.usage)) = \(v.value)")
+                if let b = v.bytes { d.append("bytes \(b)") }
+                if let lo = v.logicalMin, let hi = v.logicalMax { d.append("logical \(lo)…\(hi)") }
+                if let size = v.reportSize, let count = v.reportCount { d.append("\(size)×\(count) bits") }
+                if let u = v.unit, u != 0 { d.append(String(format: "unit 0x%X", u) + (v.unitExponent.map { $0 != 0 ? " e\($0)" : "" } ?? "")) }
+                var label = v.type == "input-null" && key.page == 0 ? "Padding (no usage)" : UPSHID.label(key)
+                let group = "Elements › " + UPSHID.sectionName(v.section)
+                // The same usage often comes twice (this UPS sends each value as a feature and
+                // as an input): later ones say which, so every row keeps its own key.
+                let n = seen[group + label, default: 0]
+                seen[group + label] = n + 1
+                if n > 0 { label += " (\(v.type ?? "?")\(n > 1 ? " \(n + 1)" : ""))" }
+                rows.append(Row(group: group, label, value, detail: d.joined(separator: " · ")))
+            }
+            for c in raw.collections ?? [] {
+                let kinds = [0: "physical", 1: "application", 2: "logical", 3: "report", 4: "named array", 5: "usage switch", 6: "usage modifier"]
+                rows.append(Row(group: "Collections", "\(hex(c.page))/\(hex(c.usage))", kinds[Int(c.collectionType)] ?? "type \(c.collectionType)",
+                                detail: "cookie \(c.cookie)" + (c.parentCookie.map { " · inside \($0)" } ?? "")))
+            }
+            for r in raw.reports ?? [] {
+                rows.append(Row(group: "Reports (GET_REPORT)", "\(r.type) \(r.id)",
+                                r.bytes ?? String(format: "refused (0x%08X)", UInt32(bitPattern: r.error ?? 0)),
+                                detail: r.bytes.map { "\($0.count / 2) bytes" }))
+            }
+            if let d = raw.descriptor { rows.append(Row(group: "Report descriptor", "\(d.count / 2) bytes", d)) }
+            for (k, v) in (raw.properties ?? [:]).sorted(by: { $0.key < $1.key }) { rows.append(Row(group: "Device properties", k, v)) }
+            let enc = JSONEncoder()
+            enc.outputFormatting = [.sortedKeys]
+            if let data = try? enc.encode(raw), let obj = try? JSONSerialization.jsonObject(with: data) { json["capture"] = obj }
+        } else if let report {
+            for f in report.fields {
+                rows.append(Row(group: f.section, f.label, f.value, detail: "\(hex(f.key.section)) · \(hex(f.key.page))/\(hex(f.key.usage)) = \(f.raw)"))
+            }
         }
+        if let report { json["decoded"] = readingJSON(report.reading) }
         json["readAgeSeconds"] = value(readAge.map { ($0 * 10).rounded() / 10 })
         let sub: String
-        if let report, let age = readAge { sub = "\(report.fields.count) elements · read \(age < 1.5 ? "just now" : Duration.text(age) + " ago") in \(report.readMillis) ms" }
-        else { sub = attached ? "Reading the UPS…" : "UPS not reachable over USB HID" }
+        if let raw, let age = readAge {
+            let failed = raw.values.filter { $0.error != nil }.count
+            var parts = ["\(raw.values.count) elements" + (failed > 0 ? " (\(failed) failed)" : "")]
+            if raw.reports != nil {
+                parts.append("\(raw.collections?.count ?? 0) collections")
+                parts.append("\(raw.reports?.count ?? 0) reports")
+            } else {
+                parts.append("the routine read (input and feature elements, first of each usage); the full capture comes with live updates or Refresh")
+            }
+            parts.append("read \(age < 1.5 ? "just now" : Duration.text(age) + " ago") in \(raw.readMillis) ms")
+            sub = parts.joined(separator: " · ")
+        } else { sub = attached ? "Reading the UPS…" : "UPS not reachable over USB HID" }
         return Section(id: "ups", title: "UPS (USB HID)", symbol: "powerplug", rows: rows, json: json, subtitle: sub)
     }
 

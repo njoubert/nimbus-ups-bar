@@ -88,9 +88,10 @@ any moment. Then:
   ten-second quick test.
 - **Inspector…** (⌘I): a window with everything the app knows, live. *Unified* puts every page in
   one table (and its JSON adds the recent changes and the log tail; *Copy All* copies it, the same
-  document `--inspect-json` prints). Then a page per section: every
-  field the UPS reports over USB HID (decoded, with each element's collection, page, usage and raw
-  value), the entry macOS keeps for it (`pmset -g ps`) and the Mac's own battery, the health
+  document `--inspect-json` prints). Then a page per section: exactly
+  what the UPS returns over USB HID (every element in its report descriptor, decoded where the
+  app knows it, each with its type, cookie, report, address, bytes and range, and a failed read
+  shown as one; the collections; every report's bytes; the descriptor; the device's properties), the entry macOS keeps for it (`pmset -g ps`) and the Mac's own battery, the health
   checks, the outage guard (phase, countdowns, the policy it runs), the protected volumes and who
   holds them, how the readings are taken (cadence, read counts, failures, power-source events),
   and the background agent and this copy (SMAppService status, the launchd job's state, pid, runs
@@ -101,8 +102,9 @@ any moment. Then:
   newest first, each line with an icon and a colour for its kind (outage, stage, apps, volumes,
   the UPS, problems, rehearsals; the once-a-minute progress lines on request),
   read from the text log `~/Library/Logs/Nimbus UPS Bar/ups-bar.log`, with *Open Log File* and
-  *Show in Finder*. While the Inspector is on screen the UPS is
-  read as often as on battery.
+  *Show in Finder*. While the Inspector is on screen with *Live
+  updates* on (the checkbox at the foot of the sidebar), the UPS is read as often as on battery and
+  every page follows; off, the pages hold still until *Refresh*.
 - **Simulate an Outage**: a **rehearsal** (a pretend outage at 10× speed against the real volumes
   and the real apps holding them, under the current policy; it logs what it would do and touches
   nothing), in four scenarios: the battery draining, a short battery (so the runtime and charge
@@ -217,7 +219,7 @@ The command line has the same readers and the same guard with no UI:
                                            a rehearsal in the terminal
 .build/debug/NimbusUpsBar --holders /Volumes/Flitslig
 .build/debug/NimbusUpsBar --volumes
-.build/debug/NimbusUpsBar --dump-hid-raw cp1500.json   every raw HID element value, as the decode's fixture
+.build/debug/NimbusUpsBar --dump-hid-raw cp1500.json   everything the UPS returns over USB HID, as JSON
 .build/debug/NimbusUpsBar --after-safe sleep           sleep (or shutdown), once, after a typed confirmation
 ```
 

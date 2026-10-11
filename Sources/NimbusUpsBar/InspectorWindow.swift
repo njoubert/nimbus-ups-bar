@@ -18,6 +18,13 @@ final class InspectorWindowController: NSWindowController, NSWindowDelegate {
     let detail: InspectorDetail
     private var observers: [NSObjectProtocol] = []
     private var pending = false
+    /// Live updates on: every read redraws the pages and flashes what changed. Off: the pages
+    /// hold still (for a close look, or when the flashing distracts) until Refresh or until
+    /// it is turned back on; the UPS goes back to its normal pace meanwhile. Remembered.
+    static let liveKey = "inspectorLive"
+    private(set) var live = UserDefaults.standard.object(forKey: InspectorWindowController.liveKey) as? Bool ?? true
+    /// Refresh while paused: take the next update, then hold still again.
+    private var oneShot = false
 
     init(monitor: UPSMonitor, updater: Updater?) {
         model = InspectorModel(monitor: monitor, updater: updater)
@@ -38,6 +45,10 @@ final class InspectorWindowController: NSWindowController, NSWindowDelegate {
         window.contentViewController = split
         window.setContentSize(NSSize(width: 960, height: 620))
         sidebar.onSelect = { [weak self] id in self?.detail.show(id) }
+        sidebar.onLive = { [weak self] on in self?.setLive(on) }
+        sidebar.onRefresh = { [weak self] in self?.refreshOnce() }
+        sidebar.setLive(live)
+        detail.paused = !live
         model.refresh()
         sidebar.reload()
         sidebar.select("unified")
@@ -57,18 +68,54 @@ final class InspectorWindowController: NSWindowController, NSWindowDelegate {
         if window?.isVisible != true { window?.center() }
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
+        // Opening the window always takes one full, fresh look, live updates on or off.
+        refreshOnce()
         visibilityChanged()
+        // Whether anyone can see the window (another Space, a full-screen app, the window
+        // covered) changes without a reliable notification: while it is open, look once a
+        // second rather than rely on one.
+        visibilityTimer?.invalidate()
+        let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.visibilityChanged() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        visibilityTimer = t
     }
+    private var visibilityTimer: Timer?
+
+    func windowDidChangeOcclusionState(_ notification: Notification) { visibilityChanged() }
+    func windowDidMiniaturize(_ notification: Notification) { visibilityChanged() }
+    func windowDidDeminiaturize(_ notification: Notification) { visibilityChanged() }
 
     /// Several notifications arrive per read (the poll, the HID result, a log line): one
     /// rebuild for the lot.
+    func setLive(_ on: Bool) {
+        live = on
+        UserDefaults.standard.set(on, forKey: InspectorWindowController.liveKey)
+        sidebar.setLive(on)
+        detail.paused = !on
+        visibilityChanged()
+        detail.reload()
+    }
+
+    /// One fresh look while paused: read the UPS now and redraw once the result is in.
+    private func refreshOnce() {
+        oneShot = true
+        model.monitor.readNow()
+        scheduleRefresh()
+    }
+
     private func scheduleRefresh() {
-        guard window?.isVisible == true, !pending else { return }
+        guard window?.isVisible == true, !pending, live || oneShot else { return }
         pending = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.pending = false
+                // A one-shot refresh waits for the HID read it asked for, then stops.
+                if !self.live, self.oneShot, self.model.monitor.hid.isAttached,
+                   self.model.monitor.hidReadAt.map({ monotonicNow() - $0 > 1 }) ?? true { return }
+                self.oneShot = false
                 self.model.refresh()
                 self.sidebar.reload()
                 self.detail.reload()
@@ -78,12 +125,23 @@ final class InspectorWindowController: NSWindowController, NSWindowDelegate {
 
     private func visibilityChanged() {
         let visible = window.map { $0.isVisible && $0.occlusionState.contains(.visible) } ?? false
-        if model.monitor.inspectorOpen != visible { model.monitor.inspectorOpen = visible }
-        if visible { scheduleRefresh() }
+        // The full HID capture whenever the window can be seen; the fast pace only while live.
+        let fast = visible && live
+        let becameVisible = visible && !model.monitor.inspectorVisible
+        if model.monitor.inspectorVisible != visible { model.monitor.inspectorVisible = visible }
+        if model.monitor.inspectorOpen != fast { model.monitor.inspectorOpen = fast }
+        // Shown again (from another Space, unminimised) while paused: one complete look.
+        if becameVisible, !live { refreshOnce() }
+        if visible, fast != wasFast { scheduleRefresh() }
+        wasFast = fast
     }
+    private var wasFast = false
 
     func windowWillClose(_ notification: Notification) {
+        visibilityTimer?.invalidate()
+        visibilityTimer = nil
         model.monitor.inspectorOpen = false
+        model.monitor.inspectorVisible = false
     }
 }
 
@@ -93,7 +151,11 @@ final class InspectorWindowController: NSWindowController, NSWindowDelegate {
 final class InspectorSidebar: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     let model: InspectorModel
     var onSelect: ((String) -> Void)?
+    var onLive: ((Bool) -> Void)?
+    var onRefresh: (() -> Void)?
     private let table = NSTableView()
+    private var liveBox: NSButton!
+    private var refreshButton: NSButton!
     private(set) var entries: [(id: String, title: String, symbol: String, badge: String?)] = []
 
     init(model: InspectorModel) {
@@ -113,8 +175,38 @@ final class InspectorSidebar: NSViewController, NSTableViewDataSource, NSTableVi
         table.delegate = self
         table.rowHeight = 26
         scroll.documentView = table
-        view = scroll
+        // At the foot of the sidebar: one setting for the whole window, in the same place
+        // whichever page is showing.
+        liveBox = NSButton(checkboxWithTitle: "Live updates", target: self, action: #selector(liveToggled))
+        liveBox.toolTip = "On: the pages follow every read and flash what changed. Off: they hold still until Refresh."
+        refreshButton = NSButton(title: "Refresh", target: self, action: #selector(refreshClicked))
+        refreshButton.controlSize = .small
+        refreshButton.bezelStyle = .rounded
+        let foot = NSStackView(views: [liveBox, refreshButton])
+        foot.spacing = 8
+        let v = NSView()
+        for x in [scroll, foot] as [NSView] { x.translatesAutoresizingMaskIntoConstraints = false; v.addSubview(x) }
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: v.topAnchor),
+            scroll.leadingAnchor.constraint(equalTo: v.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: v.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: foot.topAnchor, constant: -8),
+            foot.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 14),
+            foot.trailingAnchor.constraint(lessThanOrEqualTo: v.trailingAnchor, constant: -8),
+            foot.bottomAnchor.constraint(equalTo: v.bottomAnchor, constant: -12),
+            foot.heightAnchor.constraint(equalToConstant: 22),
+        ])
+        view = v
     }
+
+    func setLive(_ on: Bool) {
+        _ = view
+        liveBox.state = on ? .on : .off
+        refreshButton.isHidden = on
+    }
+
+    @objc private func liveToggled() { onLive?(liveBox.state == .on) }
+    @objc private func refreshClicked() { onRefresh?() }
 
     func reload() {
         var e = [(id: "unified", title: "Unified", symbol: "square.stack.3d.up", badge: nil as String?)]
@@ -175,6 +267,8 @@ final class InspectorSidebar: NSViewController, NSTableViewDataSource, NSTableVi
 final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     let model: InspectorModel
     private(set) var current = "ups"
+    /// Live updates are off: the subtitle says so.
+    var paused = false
     private let titleLabel = NSTextField(labelWithString: "")
     private let subtitle = NSTextField(labelWithString: "")
     private let mode = NSSegmentedControl(labels: ["Table", "JSON"], trackingMode: .selectOne, target: nil, action: nil)
@@ -378,6 +472,7 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
             }
             lines = out
         }
+        if paused { subtitle.stringValue = "Paused · " + subtitle.stringValue }
         subtitle.toolTip = subtitle.stringValue
         if showingJSON {
             let json = Inspector.json(currentJSON())
@@ -431,10 +526,8 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
             let f = DateFormatter(); f.dateFormat = Calendar.current.isDateInToday(date) ? "HH:mm:ss" : "MMM d HH:mm:ss"
             let id = tableColumn?.identifier.rawValue ?? "label"
             let cell = NSTableCellView()
-            let t = NSTextField(labelWithString: id == "label" ? f.string(from: date) : id == "value" ? line : kind.title)
-            t.lineBreakMode = .byTruncatingTail
-            t.isSelectable = true
-            t.toolTip = line
+            let t = InspectorDetail.oneLineLabel(id == "label" ? f.string(from: date) : id == "value" ? line : kind.title)
+            t.toolTip = InspectorDetail.tip(line)
             t.translatesAutoresizingMaskIntoConstraints = false
             if id == "label" { t.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular); t.textColor = .secondaryLabelColor }
             if id == "detail" { t.textColor = .secondaryLabelColor; t.font = .systemFont(ofSize: NSFont.smallSystemFontSize) }
@@ -468,10 +561,7 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
             default: value = r.detail ?? ""
             }
             let cell = NSTableCellView()
-            let t = NSTextField(labelWithString: value)
-            t.lineBreakMode = .byTruncatingTail
-            t.isSelectable = true
-            t.toolTip = value.isEmpty ? nil : value
+            let t = InspectorDetail.oneLineLabel(value)
             if id == "value" { t.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .medium) }
             if id == "detail" { t.textColor = .secondaryLabelColor; t.font = .systemFont(ofSize: NSFont.smallSystemFontSize) }
             t.translatesAutoresizingMaskIntoConstraints = false
@@ -500,6 +590,25 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
 }
 
 extension InspectorDetail {
+    /// A table cell's text: one line whatever the value holds (a property's JSON, a long path),
+    /// cut with "…"; the whole value is in the tooltip and in the JSON view.
+    static func oneLineLabel(_ value: String) -> NSTextField {
+        let t = NSTextField(labelWithString: value.split(whereSeparator: \.isWhitespace).joined(separator: " "))
+        t.usesSingleLineMode = true
+        t.maximumNumberOfLines = 1
+        t.cell?.wraps = false
+        t.lineBreakMode = .byTruncatingTail
+        t.isSelectable = true
+        t.toolTip = tip(value)
+        return t
+    }
+
+    /// Tooltips past a few thousand characters stop being readable: say where the rest is.
+    static func tip(_ value: String) -> String? {
+        guard !value.isEmpty else { return nil }
+        return value.count > 3000 ? String(value.prefix(3000)) + "… (the whole value is in the JSON view)" : value
+    }
+
     /// Status colours for the kinds that are about the outage; the rest stay neutral.
     static func color(_ k: LogEvent.Kind) -> NSColor {
         switch k {

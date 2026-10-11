@@ -35,9 +35,10 @@ README before changing the policy or the stages.
   outage paths run without an outage. Likewise a change to `Health`, `UPSHID.decode`,
   `VolumeRegistry.state(from:)`, `Holders.describe` or `ReadingMerge` without a fixture test in
   `Tests/NimbusUpsBarKitTests/` is not finished: those are the rules that misfire on an input
-  nobody tried. The committed HID dump (`Tests/NimbusUpsBarKitTests/Fixtures/cp1500pfclcda.json`,
-  from `--dump-hid-raw`) is the decode's reference; a second UPS model is a second fixture, not a
-  second desk.
+  nobody tried. The committed HID dumps are the decode's reference: `cp1500pfclcda.json` (2026-10-10,
+  values only) and `cp1500pfclcda-full.json` (2026-10-11, `--dump-hid-raw`'s full capture: every
+  element with its metadata, the collections, every report's bytes, the descriptor, the device's
+  properties). A second UPS model is a second fixture, not a second desk.
 - **Licence headers.** Every new Swift file starts with `// Copyright (C) 2026 Niels Joubert` /
   `// SPDX-License-Identifier: GPL-3.0-or-later`. GPL-3.0-or-later; don't vendor incompatible code.
 - **It talks to nothing but GitHub, and only for updates.** `api.github.com` plus
@@ -52,6 +53,11 @@ README before changing the policy or the stages.
   directly unless the owner explicitly says to commit straight to `main` for that change; an
   earlier instruction to do so does not carry over to the next change. Landing a PR (merge,
   delete the branch) is also the owner's call.
+- **Check that a push arrived before relying on it.** Compare `git rev-parse HEAD` with
+  `git ls-remote origin refs/heads/<branch>` after every push, and the PR's `headRefOid` with
+  the local commit before merging; never filter a push's output away. On 2026-10-11 three
+  commits of PR #8 never reached GitHub, the PR merged without them, and PR #9 had to restore
+  them.
 - **A PR that touches anything the owner sees gets a screenshot in its description**: the menu,
   the headline, the chart, the Settings window, notifications, the icon, the DMG. Show the
   state the change is about (hovered, empty, light and dark where it matters), before and after
@@ -86,8 +92,11 @@ Sources/UpsGuardCore/        the library the tests drive; no AppKit, no IOKit
 Sources/NimbusUpsBarKit/     the platform layer, a library so it is testable (AppKit and IOKit
                              allowed; no UI, no Log, no Settings)
   PowerSources.swift         IOPSCopyPowerSourcesInfo + the change notification; monotonicNow()
-  UPSHID.swift               the UPS over USB HID: fetch() → RawReport (the device, ~30 ms) and
-                             decode(_:now:) → Report (pure; the quirks); the self-test write
+  UPSHID.swift               the UPS over USB HID: fetch() → RawReport (the routine read, the 58
+                             elements the decode uses, ~30 ms) or fetch(full: true) (every
+                             element, report, the descriptor and properties, ~100 ms; the
+                             Inspector and --dump-hid-raw); decode(_:now:) → Report (pure; the
+                             quirks); the self-test write
   Volumes.swift              VolumeRegistry: Disk Arbitration callbacks, state(from:) (pure
                              external filter), force unmount, mount
   Holders.swift              proc_listpidspath → Holder; describe (pure); quit by bundle id
@@ -126,7 +135,7 @@ Sources/NimbusUpsBar/        the app
                              the charge limit, outage bands, hover readout
   AppIcon.swift, DMGBackground.swift, Updates.swift   as in the siblings
 Tests/UpsGuardCoreTests/     76 scenarios against FakeEnvironment, each rehearsal scenario among them
-Tests/NimbusUpsBarKitTests/  57 checks: the HID decode against Fixtures/cp1500pfclcda.json and
+Tests/NimbusUpsBarKitTests/  62 checks: the HID decode against both CP1500 fixtures and
                              hand-made maps, every health rule (and that each menu row fits), the
                              DA dictionary filter, the holder resolver, the merge, the Inspector's
                              sections, JSON and diff, the launchctl parser, the log-line kinds
@@ -146,7 +155,7 @@ main.
 
 ```
 ./build.sh run [--fg]         debug build as dist/debug/Nimbus UPS Bar.app (quits any running copy first)
-./build.sh test               swift test: the 76 guard scenarios and the 57 platform checks
+./build.sh test               swift test: the 76 guard scenarios and the 62 platform checks
 ./build.sh install            release → /Applications, register the agent (owner's call), launch
 .build/debug/NimbusUpsBar --print        the UPS, health, every HID field, volumes, holders, policy
 .build/debug/NimbusUpsBar --print-menu   the menu built against the real UPS, as an indented tree
@@ -160,7 +169,7 @@ main.
 .build/debug/NimbusUpsBar --dump-chart P the chart with fake data at menu width → P, P-hover, P-light, P-empty
 .build/debug/NimbusUpsBar --dump-settings D   each Settings pane → D/N-name.png, then the real window
                                          on screen for ~3 s → D/window-N-name.png (the layout check)
-.build/debug/NimbusUpsBar --dump-hid-raw P   every raw HID element value as JSON: the decode fixture
+.build/debug/NimbusUpsBar --dump-hid-raw P   the full HID capture as JSON: the decode's fixture
 .build/debug/NimbusUpsBar --after-safe sleep|shutdown   the power-down action once, at a TTY, after typing it
 ```
 
@@ -227,9 +236,14 @@ the end, so `safe` is reached the moment the last volume lands rather than two s
   element it read last: 122000 mV at one read, 27100 (the battery) a minute later. The app ignores
   it (it still shows in the Inspector › Power Source) and takes every voltage from HID.
 - **The HID report is the richer source**, read through `IOHIDManager` with a shared open
-  (`ioupsd` keeps its own). 58 unique elements on the CP1500PFCLCDa; a full read is ~30 ms (11 ms
-  seen). Elements are keyed by (enclosing collection, page, usage): `Voltage` 0x84/0x30 exists
-  under Input, Output and the battery's PowerSummary.
+  (`ioupsd` keeps its own). The CP1500PFCLCDa's descriptor (726 bytes) declares 158 elements in
+  10 collections: 58 feature, 12 input-misc, 10 input-button, 2 output, 76 input-null padding.
+  Every input value also exists as a feature (the battery flags in input report 11 and feature
+  report 11; the charge in input report 8); macOS lists the input copy first. The two vendor
+  output elements (0xFF01/0x15, 0x17) and two padding elements fail to read (0xE0005000), as
+  does GET_REPORT for input report 0. The decode reads the first input or feature element of
+  each (enclosing collection, page, usage), 58 of them, ~30 ms; `Voltage` 0x84/0x30 exists
+  under Input, Output and the battery's PowerSummary, which the key tells apart.
 - **Read with `kIOHIDDeviceGetValueWithUpdate` (0x00020000).** The plain `IOHIDDeviceGetValue`
   returns the *cached* value for Input-type elements, and the ones the UPS does not push on its
   own (self-test result, beeper, the transfer voltages, rid 12/16/20) then read 0. The first probe

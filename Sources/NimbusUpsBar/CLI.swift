@@ -35,10 +35,11 @@ enum CLI {
             return 0
 
         case .dumpHIDRaw(let path):
-            // Every raw element value, as the JSON fixture `UPSHID.decode` is tested against.
+            // Everything the UPS returns (every element, every report, the descriptor, the
+            // properties), as the JSON fixture `UPSHID.decode` and the Inspector are tested against.
             let hid = UPSHID()
             spin(1.0)
-            guard let raw = hid.fetch() else { fputs("no UPS over USB HID\n", stderr); return 1 }
+            guard let raw = hid.fetch(full: true) else { fputs("no UPS over USB HID\n", stderr); return 1 }
             let enc = JSONEncoder()
             enc.outputFormatting = [.prettyPrinted, .sortedKeys]
             guard let data = try? enc.encode(raw) else { return 1 }
@@ -121,6 +122,7 @@ enum CLI {
             // Every Inspector page in one JSON document, without a window: the whole snapshot for an agent.
             let m = UPSMonitor()
             m.inspectorOpen = true
+            m.inspectorVisible = true
             m.poll(reason: nil)
             spin(1.0)
             m.poll(reason: nil)
@@ -141,7 +143,10 @@ enum CLI {
             try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
             let wc = InspectorWindowController(monitor: m, updater: nil)
             wc.show()
-            spin(1.5)
+            // The window may open on a Space nobody is looking at, where it counts as hidden and
+            // asks for nothing: ask for the full capture here.
+            m.readNow()
+            spin(3.0)
             for (i, e) in wc.sidebar.entries.enumerated() {
                 for json in [false, true] {
                     if json, ["changes", "events"].contains(e.id) { continue }  // their JSON is a log list
