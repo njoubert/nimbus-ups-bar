@@ -103,7 +103,8 @@ Sources/NimbusUpsBarKit/     the platform layer, a library so it is testable (Ap
   Health.swift               the health rules → [Item] with a level (pure)
   Merge.swift                ReadingMerge: IOKit's entry + a fresh HID report → one reading (pure)
   Inspector.swift            the Inspector's data: Section/Row, the UPS / power source / health /
-                             guard / volumes sections, JSON (sorted, pretty), the change diff (pure)
+                             guard / volumes sections, JSON (sorted, pretty), the change diff, the
+                             page search (substring match, heading-aware filter, JSON ranges) (pure)
   Launchd.swift              `launchctl print gui/<uid>/<label>` and its parser (the agent's job)
   LogEvent.swift             a log line's kind (outage, stage, apps, volume, …) for Events (pure)
 Sources/NimbusUpsBar/        the app
@@ -121,7 +122,7 @@ Sources/NimbusUpsBar/        the app
                              every setter posts Settings.didChange
   InspectorModel.swift       the Inspector's sections from the monitor, plus readings and agent;
                              the change log, the flash stamps, the whole snapshot as JSON
-  InspectorWindow.swift      the Inspector window: sidebar, Table/JSON, Copy Page, flash rows
+  InspectorWindow.swift      the Inspector window: sidebar, Table/JSON, search, Copy Page, flash rows
   SettingsWindow.swift       the Settings window: NSTabViewController with toolbar tabs, the four
                              panes, Form/Controls helpers, DurationFormatter, the main menu
   Log.swift                  the log file (the Inspector's Events reads its tail), a 1000-line ring, os_log
@@ -135,10 +136,10 @@ Sources/NimbusUpsBar/        the app
                              the charge limit, outage bands, hover readout
   AppIcon.swift, DMGBackground.swift, Updates.swift   as in the siblings
 Tests/UpsGuardCoreTests/     77 scenarios against FakeEnvironment, each rehearsal scenario among them
-Tests/NimbusUpsBarKitTests/  65 checks: the HID decode against both CP1500 fixtures and
+Tests/NimbusUpsBarKitTests/  68 checks: the HID decode against both CP1500 fixtures and
                              hand-made maps, every health rule (and that each menu row fits), the
                              DA dictionary filter, the holder resolver, the merge, the Inspector's
-                             sections, JSON and diff, the launchctl parser, the log-line kinds
+                             sections, JSON, diff and search, the launchctl parser, the log-line kinds
 docs/                        icon.png (build.sh icon); phase-2-email-notifications.md (design)
 build.sh                     build / test / run / stop / app / dmg / release / install /
                              uninstall / status / icon / clean
@@ -155,7 +156,7 @@ main.
 
 ```
 ./build.sh run [--fg]         debug build as dist/debug/Nimbus UPS Bar.app (quits any running copy first)
-./build.sh test               swift test: the 77 guard scenarios and the 65 platform checks
+./build.sh test               swift test: the 77 guard scenarios and the 68 platform checks
 ./build.sh install            release → /Applications, register the agent (owner's call), launch
 .build/debug/NimbusUpsBar --print        the UPS, health, every HID field, volumes, holders, policy
 .build/debug/NimbusUpsBar --print-menu   the menu built against the real UPS, as an indented tree

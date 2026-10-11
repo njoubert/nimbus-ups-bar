@@ -97,7 +97,9 @@ any moment. Then:
   and the background agent and this copy (SMAppService status, the launchd job's state, pid, runs
   and last exit code, the bundle, the version). Each section is a table whose rows flash when a
   value changes, or the same as JSON; *Copy Page* puts the page's JSON on the clipboard, the form
-  to paste into an agent. *Changes* lists every value that moved
+  to paste into an agent. *Search this page* (⌘F) matches plain text, ignoring case, on the
+  open page only: the table keeps the matching rows under their headings, the JSON highlights
+  the matches (Return steps to the next); *Copy Page* still copies the whole page. *Changes* lists every value that moved
   since the window opened, with the old and the new. *Events* is what the app decided and did,
   newest first, each line with an icon and a colour for its kind (outage, stage, apps, volumes,
   the UPS, problems, rehearsals; the once-a-minute progress lines on request),

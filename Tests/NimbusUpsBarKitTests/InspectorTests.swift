@@ -69,6 +69,58 @@ final class InspectorTests: XCTestCase {
         XCTAssertTrue(JSONSerialization.isValidJSONObject(s.json))
     }
 
+    func testSearchIsPlainSubstringIgnoringCaseAndAccents() {
+        XCTAssertTrue(Inspector.matches("volt", ["Input Voltage"]))
+        XCTAssertTrue(Inspector.matches("CAFE", ["café"]))
+        XCTAssertTrue(Inspector.matches("0x84", [nil, "page 0x84 usage 0x30"]))
+        XCTAssertFalse(Inspector.matches("volts", ["Voltage"]))
+        XCTAssertTrue(Inspector.matches("  ", [nil]), "a blank query matches everything")
+    }
+
+    func testSearchNarrowsTheUPSPageKeepingItsHeadings() throws {
+        let raw = try fixture("cp1500pfclcda-full")
+        let s = Inspector.ups(raw: raw, report: UPSHID.decode(raw, now: 0), readAge: 1, attached: true)
+        // The page's lines as the window builds them: a heading wherever the group changes.
+        enum Line { case heading(String); case row(Inspector.Row) }
+        var lines: [Line] = []
+        var group: String?
+        for r in s.rows {
+            if r.group != group, let g = r.group { lines.append(.heading(g)) }
+            group = r.group
+            lines.append(.row(r))
+        }
+        func search(_ q: String) -> [Line] {
+            Inspector.filter(lines, query: q, heading: { if case .heading(let h) = $0 { return h }; return nil },
+                             fields: { if case .row(let r) = $0 { return [r.label, r.value, r.detail] }; return [] })
+        }
+        func rows(_ l: [Line]) -> [Inspector.Row] { l.compactMap { if case .row(let r) = $0 { return r }; return nil } }
+
+        XCTAssertEqual(search("").count, lines.count, "no query, the whole page")
+        let failed = rows(search("0xe0005000"))
+        XCTAssertEqual(failed.filter { $0.value == "read failed (0xE0005000)" }.count, 4, "the four failed element reads, matched whatever the case")
+        XCTAssertEqual(failed.count, s.rows.filter { Inspector.matches("0xE0005000", [$0.label, $0.value, $0.detail]) }.count, "and every other row that mentions it")
+        let volts = search("voltage")
+        XCTAssertTrue(rows(volts).allSatisfy { Inspector.matches("voltage", [$0.label, $0.value, $0.detail]) })
+        XCTAssertFalse(rows(volts).isEmpty)
+        // Every heading kept has a row under it, and every row kept follows its own heading.
+        for (i, l) in volts.enumerated() {
+            if case .heading(let h) = l {
+                guard i + 1 < volts.count, case .row(let r) = volts[i + 1] else { return XCTFail("empty heading \(h)") }
+                XCTAssertEqual(r.group, h)
+            }
+        }
+        // A heading that matches keeps everything under it.
+        XCTAssertEqual(rows(search("Device properties")).count, 47)
+        XCTAssertTrue(search("no such thing anywhere").isEmpty)
+    }
+
+    func testSearchRangesInTheJSON() {
+        let text = #"{"Voltage": 122, "voltage": "x", "é": "É"}"#
+        XCTAssertEqual(Inspector.ranges(of: "VOLTAGE", in: text).map(\.location), [2, 18])
+        XCTAssertEqual(Inspector.ranges(of: "e", in: text).count, 4, "two in each voltage, plus é and É")
+        XCTAssertTrue(Inspector.ranges(of: " ", in: text).isEmpty)
+    }
+
     func testJSONIsSortedAndStable() throws {
         let text = Inspector.json(["b": 1, "a": ["z": NSNull(), "y": "/Volumes/Flitslig"]])
         XCTAssertEqual(text, """

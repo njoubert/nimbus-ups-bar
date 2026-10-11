@@ -161,6 +161,19 @@ enum CLI {
                     Swift.print("wrote \(path)")
                 }
             }
+            // The search, on the UPS page: the narrowed table and the highlighted JSON.
+            for json in [false, true] {
+                wc.sidebar.select("ups")
+                wc.detail.selectMode(json: json)
+                wc.detail.setSearch("voltage")
+                spin(0.5)
+                guard let w = wc.window, let frame = w.contentView?.superview,
+                      let rep = frame.bitmapImageRepForCachingDisplay(in: frame.bounds) else { continue }
+                frame.cacheDisplay(in: frame.bounds, to: rep)
+                let path = "\(dir)/search-ups\(json ? "-json" : "").png"
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+                Swift.print("wrote \(path)")
+            }
             wc.close()
             return 0
 
