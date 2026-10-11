@@ -83,6 +83,9 @@ final class InspectorWindowController: NSWindowController, NSWindowDelegate {
     }
     private var visibilityTimer: Timer?
 
+    /// Edit › Find (⌘F), through the responder chain.
+    @objc func focusSearch(_ sender: Any?) { detail.focusSearch() }
+
     func windowDidChangeOcclusionState(_ notification: Notification) { visibilityChanged() }
     func windowDidMiniaturize(_ notification: Notification) { visibilityChanged() }
     func windowDidDeminiaturize(_ notification: Notification) { visibilityChanged() }
@@ -266,7 +269,7 @@ final class InspectorSidebar: NSViewController, NSTableViewDataSource, NSTableVi
 /// One section: a header (title, how fresh, Table/JSON, Copy Page) over the table or the
 /// JSON text.
 @MainActor
-final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
     let model: InspectorModel
     private(set) var current = "ups"
     /// Live updates are off: the subtitle says so.
@@ -285,6 +288,14 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
     private var extra2: NSButton!
     private var openLog: NSButton!
     private var showProgress = false
+    /// Search: plain text, the open page only. The table keeps the rows that match (and their
+    /// headings); the JSON keeps everything and highlights the matches, Return stepping through
+    /// them. The query stays when the page changes; Copy Page copies the whole page regardless.
+    private let search = NSSearchField()
+    private let matchLabel = NSTextField(labelWithString: "")
+    private var query: String { search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var jsonMatches: [NSRange] = []
+    private var matchIndex = 0
 
     /// What the table shows: a group heading or a row (with the flash key).
     private enum Line { case group(String); case row(Inspector.Row, flashKey: String?); case event(LogEvent.Kind, Date, String) }
@@ -347,6 +358,17 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
         extra2 = NSButton(title: "Show in Finder", target: self, action: #selector(revealLog))
         extra2.toolTip = Log.fileURL.path
         extra2.isHidden = true
+        search.placeholderString = "Search this page"
+        search.sendsSearchStringImmediately = true
+        search.target = self
+        search.action = #selector(searchChanged)
+        search.delegate = self
+        search.toolTip = "Plain text, ignoring case, on this page only. Table: only the matching rows. JSON: the matches highlighted; Return goes to the next."
+        matchLabel.textColor = .secondaryLabelColor
+        matchLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        let searchRow = NSStackView(views: [search, matchLabel])
+        searchRow.spacing = 8
+        search.widthAnchor.constraint(equalToConstant: 260).isActive = true
         let buttons = NSStackView(views: [extra, mode, openLog, extra2, copied])
         buttons.spacing = 8
         // The buttons are pinned to the right edge, so they stay put in every section whatever
@@ -356,14 +378,17 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
         subtitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         buttons.setContentHuggingPriority(.required, for: .horizontal)
         copied.widthAnchor.constraint(equalToConstant: 96).isActive = true
-        for x in [titles, buttons, tableScroll, textScroll] as [NSView] { x.translatesAutoresizingMaskIntoConstraints = false; v.addSubview(x) }
+        for x in [titles, buttons, searchRow, tableScroll, textScroll] as [NSView] { x.translatesAutoresizingMaskIntoConstraints = false; v.addSubview(x) }
         NSLayoutConstraint.activate([
             titles.topAnchor.constraint(equalTo: v.safeAreaLayoutGuide.topAnchor, constant: 12),
             titles.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 20),
             titles.trailingAnchor.constraint(lessThanOrEqualTo: buttons.leadingAnchor, constant: -16),
             buttons.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -16),
             buttons.centerYAnchor.constraint(equalTo: titles.centerYAnchor),
-            tableScroll.topAnchor.constraint(equalTo: titles.bottomAnchor, constant: 12),
+            searchRow.topAnchor.constraint(equalTo: titles.bottomAnchor, constant: 10),
+            searchRow.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 20),
+            searchRow.trailingAnchor.constraint(lessThanOrEqualTo: v.trailingAnchor, constant: -16),
+            tableScroll.topAnchor.constraint(equalTo: searchRow.bottomAnchor, constant: 10),
             tableScroll.leadingAnchor.constraint(equalTo: v.leadingAnchor),
             tableScroll.trailingAnchor.constraint(equalTo: v.trailingAnchor),
             tableScroll.bottomAnchor.constraint(equalTo: v.bottomAnchor),
@@ -483,11 +508,71 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
                 text.string = json
                 if !force { textScroll.contentView.scroll(to: visible) }
             }
+            highlight()
         } else {
+            let all = lines.filter { if case .group = $0 { return false }; return true }.count
+            lines = Inspector.filter(lines, query: query, heading: { if case .group(let g) = $0 { return g }; return nil }, fields: { line in
+                switch line {
+                case .row(let r, _): return [r.label, r.value, r.detail]
+                case .event(let kind, _, let text): return [text, kind.title]
+                case .group: return []
+                }
+            })
+            let shown = lines.filter { if case .group = $0 { return false }; return true }.count
+            matchLabel.stringValue = query.isEmpty ? "" : shown == 0 ? "No matches" : "\(shown) of \(all) rows"
             let visible = tableScroll.contentView.bounds.origin
             table.reloadData()
             if !force { tableScroll.contentView.scroll(to: visible) }
         }
+    }
+
+    // MARK: Search
+
+    @objc private func searchChanged() {
+        matchIndex = 0
+        reload(force: true)
+        if !showingJSON { table.scrollRowToVisible(0) }
+        if showingJSON, let first = jsonMatches.first { reveal(first) }
+    }
+
+    /// ⌘F.
+    func focusSearch() { view.window?.makeFirstResponder(search) }
+
+    /// For --dump-inspector.
+    func setSearch(_ q: String) { search.stringValue = q; searchChanged() }
+
+    /// Return in the search field: the next match in the JSON.
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        guard control === search, selector == #selector(NSResponder.insertNewline(_:)), showingJSON, !jsonMatches.isEmpty else { return false }
+        matchIndex = (matchIndex + 1) % jsonMatches.count
+        highlight()
+        reveal(jsonMatches[matchIndex])
+        return true
+    }
+
+    /// Every match in the JSON marked, the current one stronger.
+    private func highlight() {
+        guard let storage = text.textStorage else { return }
+        let whole = NSRange(location: 0, length: storage.length)
+        storage.beginEditing()
+        storage.removeAttribute(.backgroundColor, range: whole)
+        storage.addAttribute(.foregroundColor, value: NSColor.textColor, range: whole)
+        jsonMatches = Inspector.ranges(of: query, in: text.string)
+        if matchIndex >= jsonMatches.count { matchIndex = 0 }
+        for (i, r) in jsonMatches.enumerated() where i != matchIndex {
+            storage.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.3), range: r)
+        }
+        if matchIndex < jsonMatches.count {
+            storage.addAttribute(.backgroundColor, value: NSColor.findHighlightColor, range: jsonMatches[matchIndex])
+            storage.addAttribute(.foregroundColor, value: NSColor.black, range: jsonMatches[matchIndex])
+        }
+        storage.endEditing()
+        matchLabel.stringValue = query.isEmpty ? "" : jsonMatches.isEmpty ? "No matches" : "\(matchIndex + 1) of \(jsonMatches.count) matches"
+    }
+
+    private func reveal(_ r: NSRange) {
+        text.scrollRangeToVisible(r)
+        text.showFindIndicator(for: r)
     }
 
     @objc private func extraAction() {

@@ -909,6 +909,9 @@ enum MainMenu {
         edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        edit.addItem(.separator())
+        // The Inspector's search field; disabled where nothing answers (Settings).
+        edit.addItem(withTitle: "Find…", action: #selector(InspectorWindowController.focusSearch(_:)), keyEquivalent: "f")
         editItem.submenu = edit
         main.addItem(editItem)
 

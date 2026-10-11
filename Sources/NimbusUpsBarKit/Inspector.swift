@@ -55,6 +55,52 @@ public enum Inspector {
         }
     }
 
+    // MARK: Search
+
+    /// The Inspector's search: plain substring matching, ignoring case and accents. A blank
+    /// query matches everything.
+    public static func matches(_ query: String, _ fields: [String?]) -> Bool {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if q.isEmpty { return true }
+        return fields.contains { $0?.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
+    }
+
+    /// A page's lines (headings and the items under them) narrowed to a query: an item stays
+    /// when it or its heading matches, a heading when anything under it stays. `heading` returns
+    /// a heading's text (nil for an item); `fields` an item's searchable text.
+    public static func filter<T>(_ lines: [T], query: String, heading: (T) -> String?, fields: (T) -> [String?]) -> [T] {
+        var out: [T] = []
+        var pending: T?
+        var headingMatches = false
+        for line in lines {
+            if let h = heading(line) {
+                pending = line
+                headingMatches = matches(query, [h])
+                continue
+            }
+            guard headingMatches || matches(query, fields(line)) else { continue }
+            if let p = pending { out.append(p); pending = nil }
+            out.append(line)
+        }
+        return out
+    }
+
+    /// Where the query occurs in a text (the JSON view's highlights), in UTF-16 ranges.
+    public static func ranges(of query: String, in text: String) -> [NSRange] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return [] }
+        let ns = text as NSString
+        var out: [NSRange] = []
+        var from = 0
+        while from < ns.length {
+            let r = ns.range(of: q, options: [.caseInsensitive, .diacriticInsensitive], range: NSRange(location: from, length: ns.length - from))
+            if r.location == NSNotFound { break }
+            out.append(r)
+            from = r.location + max(r.length, 1)
+        }
+        return out
+    }
+
     // MARK: Diff
 
     /// Every row as "section id › row key" → value.
