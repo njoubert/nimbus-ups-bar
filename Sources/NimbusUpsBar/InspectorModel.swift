@@ -69,6 +69,15 @@ final class InspectorModel {
 
     func clearChanges() { changes = [] }
 
+    /// The window closed: Changes is "since the Inspector opened", so the next opening starts
+    /// from nothing (and its first look is the baseline, not a diff against the last session).
+    func reset() {
+        changes = []
+        changedAt = [:]
+        last = nil
+        lastFull = nil
+    }
+
     /// The log file's last lines, parsed: Events reads these rather than this process's ring,
     /// so it reaches back across relaunches and includes the command-line runs. Re-read only
     /// when the file has grown.
