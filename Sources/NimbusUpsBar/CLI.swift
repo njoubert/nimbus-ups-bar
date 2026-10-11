@@ -122,6 +122,7 @@ enum CLI {
             // Every Inspector page in one JSON document, without a window: the whole snapshot for an agent.
             let m = UPSMonitor()
             m.inspectorOpen = true
+            m.inspectorVisible = true
             m.poll(reason: nil)
             spin(1.0)
             m.poll(reason: nil)

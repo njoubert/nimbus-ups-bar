@@ -123,9 +123,13 @@ final class InspectorWindowController: NSWindowController, NSWindowDelegate {
 
     private func visibilityChanged() {
         let visible = window.map { $0.isVisible && $0.occlusionState.contains(.visible) } ?? false
-        // Fast reads (and the full HID capture) only while someone is watching live.
+        // The full HID capture whenever the window can be seen; the fast pace only while live.
         let fast = visible && live
+        let becameVisible = visible && !model.monitor.inspectorVisible
+        if model.monitor.inspectorVisible != visible { model.monitor.inspectorVisible = visible }
         if model.monitor.inspectorOpen != fast { model.monitor.inspectorOpen = fast }
+        // Paused and just shown: one complete look, then hold still.
+        if becameVisible, !live { refreshOnce() }
         if visible, fast != wasFast { scheduleRefresh() }
         wasFast = fast
     }
@@ -135,6 +139,7 @@ final class InspectorWindowController: NSWindowController, NSWindowDelegate {
         visibilityTimer?.invalidate()
         visibilityTimer = nil
         model.monitor.inspectorOpen = false
+        model.monitor.inspectorVisible = false
     }
 }
 
