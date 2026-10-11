@@ -40,7 +40,10 @@ final class Log {
         return f
     }()
 
+    static let didAppend = Notification.Name("com.njoubert.nimbusupsbar.logAppended")
+
     func append(_ line: String) {
+        defer { NotificationCenter.default.post(name: Log.didAppend, object: nil) }
         let now = Date()
         recent.append(Entry(date: now, line: line))
         if recent.count > Log.ringSize { recent.removeFirst(recent.count - Log.ringSize) }

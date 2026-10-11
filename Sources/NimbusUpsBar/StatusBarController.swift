@@ -302,9 +302,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         healthItem.image = StatusBarController.dot(overall)
         healthItem.submenu = healthMenu(health)
         menu.addItem(healthItem)
-        let details = NSMenuItem(title: "UPS Details", action: nil, keyEquivalent: "")
-        details.submenu = detailsMenu()
-        menu.addItem(details)
+        let inspector = NSMenuItem(title: "Inspector…", action: #selector(openInspector), keyEquivalent: "i")
+        inspector.target = self
+        inspector.toolTip = "Everything the UPS reports, live, with the guard, the volumes, the readings and the background agent; each section copyable as JSON."
+        menu.addItem(inspector)
         menu.addItem(.separator())
 
         let sim = NSMenuItem(title: "Simulate an Outage", action: nil, keyEquivalent: "")
@@ -491,43 +492,6 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         return m
     }
 
-    private func detailsMenu() -> NSMenu {
-        let m = NSMenu()
-        if let rep = monitor.hidReport {
-            var section = ""
-            for f in rep.fields {
-                if f.section != section {
-                    section = f.section
-                    if m.items.count > 0 { m.addItem(.separator()) }
-                    let h = disabled(section.uppercased())
-                    h.attributedTitle = NSAttributedString(string: section.uppercased(), attributes: [
-                        .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize).withWeight(.semibold), .foregroundColor: NSColor.secondaryLabelColor])
-                    m.addItem(h)
-                }
-                m.addItem(row(label: f.label, value: f.value, copy: f.value))
-            }
-            m.addItem(.separator())
-            let age = monitor.hidReadAtAge.map { "read \(Duration.text($0)) ago in \(rep.readMillis) ms" } ?? ""
-            m.addItem(disabled("USB HID report · \(age)"))
-        } else {
-            m.addItem(disabled(monitor.hid.isAttached ? "Reading the UPS…" : "UPS not reachable over USB HID"))
-        }
-        let raw = PowerSources.rawUPSDescription()
-        if !raw.isEmpty {
-            m.addItem(.separator())
-            let h = disabled("MACOS POWER SOURCE")
-            h.attributedTitle = NSAttributedString(string: "MACOS POWER SOURCE (pmset -g ps)", attributes: [
-                .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize).withWeight(.semibold), .foregroundColor: NSColor.secondaryLabelColor])
-            m.addItem(h)
-            for (k, v) in raw { m.addItem(row(label: k, value: v, copy: v)) }
-        }
-        if let b = monitor.internalBattery {
-            m.addItem(.separator())
-            m.addItem(row(label: "Mac's battery", value: "\(b.percent) %\(b.isCharging ? ", charging" : "")\(b.onAC ? ", on AC" : ", discharging")", copy: "\(b.percent)"))
-        }
-        return m
-    }
-
     // MARK: Simulation, policy, volumes to protect, events
 
     private func simulationMenu() -> NSMenu {
@@ -704,6 +668,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     @objc private func endSimulation() { monitor.endSimulation() }
 
     @objc private func openSettings() { AppDelegate.shared?.showSettings() }
+    @objc private func openInspector() { AppDelegate.shared?.showInspector() }
     @objc private func openLog() { NSWorkspace.shared.open(Log.fileURL) }
 
     @objc private func toggleAgent(_ sender: NSMenuItem) {

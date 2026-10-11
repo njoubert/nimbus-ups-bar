@@ -24,6 +24,8 @@ import UpsGuardCore
 // Command-line use of the same readers and guard (no UI):
 //   --after-safe sleep|shutdown   perform the after-safe action once, at the keyboard, after a typed confirmation
 //   --print                 everything the menu would show, as text; exit
+//   --inspect-json          the Inspector's whole snapshot (every section, as JSON) after a HID read; exit
+//   --dump-inspector DIR    the Inspector window on screen, one PNG per section (Table and JSON); exit
 //   --print-menu            the menu itself, built against the real UPS and volumes, as an indented tree; exit
 //   --watch                 print readings and the guard's log as they happen (Ctrl-C to stop)
 //   --simulate [SCENARIO]   run a rehearsal (pretend outage, nothing touched) in the terminal; exit when done.
@@ -38,7 +40,7 @@ func usage() -> Never {
     usage: NimbusUpsBar [--enable-agent | --disable-agent | --agent-status | --agent-plist]
                         [--render-icon PATH [--size PX]] [--render-iconset DIR]
                         [--render-dmg-background DIR [--signed]] [--dump-bar PATH] [--dump-chart PATH]
-                        [--dump-settings DIR] [--dump-hid-raw PATH] [--after-safe sleep|shutdown]
+                        [--dump-settings DIR] [--dump-inspector DIR] [--inspect-json] [--dump-hid-raw PATH] [--after-safe sleep|shutdown]
                         [--print | --print-menu | --watch | --simulate [SCENARIO] | --holders PATH | --volumes]
                         [--check-update | --preflight APP.app]
     """)
@@ -120,6 +122,8 @@ while !args.isEmpty {
         }
         exit(0)
     case "--dump-settings": cli = .dumpSettings(dir: takeValue(a))
+    case "--dump-inspector": cli = .dumpInspector(dir: takeValue(a))
+    case "--inspect-json": cli = .inspectJSON
     case "--dump-hid-raw": cli = .dumpHIDRaw(path: takeValue(a))
     case "--after-safe": cli = .afterSafe(action: takeValue(a))
     case "--print": cli = .print
@@ -170,6 +174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var statusBar: StatusBarController!
     var updater: Updater?
     var settings: SettingsWindowController?
+    var inspector: InspectorWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -227,6 +232,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func showSettings() {
         if settings == nil { settings = SettingsWindowController(monitor: monitor, updater: updater) }
         settings?.show()
+    }
+
+    /// The Inspector, made on first use and kept (its change log lives as long as the app).
+    @objc func showInspector() {
+        if inspector == nil { inspector = InspectorWindowController(monitor: monitor, updater: updater) }
+        inspector?.show()
     }
 
     /// Turning the agent on makes launchd start a second copy at once (RunAtLoad), which then

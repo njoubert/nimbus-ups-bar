@@ -92,6 +92,19 @@ public final class PowerSources {
     }
 
     /// The raw UPS dictionary, for the details submenu and `--print`.
+    /// The UPS's power-source dictionary with JSON-safe values (strings, numbers, booleans;
+    /// anything else as its description), for the Inspector's copy. Nil when none is listed.
+    public nonisolated static func rawUPSDictionary() -> [String: Any]? {
+        let blob = IOPSCopyPowerSourcesInfo().takeRetainedValue()
+        let list = IOPSCopyPowerSourcesList(blob).takeRetainedValue() as [CFTypeRef]
+        for ps in list {
+            guard let d = IOPSGetPowerSourceDescription(blob, ps)?.takeUnretainedValue() as? [String: Any],
+                  d[kIOPSTypeKey] as? String == kIOPSUPSType else { continue }
+            return d.mapValues { v in (v is String || v is NSNumber) ? v : "\(v)" }
+        }
+        return nil
+    }
+
     public nonisolated static func rawUPSDescription() -> [(String, String)] {
         let blob = IOPSCopyPowerSourcesInfo().takeRetainedValue()
         let list = IOPSCopyPowerSourcesList(blob).takeRetainedValue() as [CFTypeRef]
