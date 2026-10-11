@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import AppKit
 import Foundation
+import NimbusUpsBarKit
 import UserNotifications
 
 /// User notifications for the outage stages. `UNUserNotificationCenter` only works from a

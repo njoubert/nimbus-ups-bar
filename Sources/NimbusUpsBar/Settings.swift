@@ -1,6 +1,7 @@
 // Copyright (C) 2026 Niels Joubert
 // SPDX-License-Identifier: GPL-3.0-or-later
 import Foundation
+import NimbusUpsBarKit
 import UpsGuardCore
 
 /// The owner's choices, in UserDefaults under the bundle id (`defaults read

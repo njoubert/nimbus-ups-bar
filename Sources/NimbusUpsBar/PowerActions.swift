@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import AppKit
 import Foundation
+import NimbusUpsBarKit
 import IOKit.pwr_mgt
 
 /// The three things the guard does to the Mac itself.

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import AppKit
 import NimbusUpdater
+import NimbusUpsBarKit
 import UpsGuardCore
 
 /// The status item and its dropdown. On line power the bar shows a bolt (and the load, if
@@ -197,6 +198,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         case .restoring:
             color = .systemBlue
             subtitle = "Power is back; remounting"
+        }
+        // The two debounces: mains back but not yet trusted, and the UPS not answering.
+        if st.phase.isOutage, let sd = st.untilStandDown {
+            color = .systemBlue
+            subtitle = "Power is back · outage over in \(Duration.countdown(sd)) unless it fails again"
+        } else if st.phase.isOutage, let gone = st.upsAbsentFor, gone >= 2 {
+            subtitle = "UPS not answering for \(Duration.text(gone)) · " + subtitle
         }
         if let sim = monitor.simulation { title = (sim.kind == .rehearsal ? "Rehearsal · " : "Drill · ") + title }
         var figures: [(String, String)] = []

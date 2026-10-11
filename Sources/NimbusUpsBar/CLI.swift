@@ -3,6 +3,7 @@
 import AppKit
 import Foundation
 import NimbusUpdater
+import NimbusUpsBarKit
 import UpsGuardCore
 
 /// The command-line face: the same readers and the same guard as the menu, minus the UI.
@@ -19,12 +20,53 @@ enum CLI {
         case preflight(app: String)
         case agentPlist
         case printMenu
+        case dumpHIDRaw(path: String)
+        case afterSafe(action: String)
     }
 
     static func run(_ cmd: Command) -> Int32 {
         switch cmd {
         case .agentPlist:
             Swift.print(BackgroundAgent.plist(executable: Updates.executableName))
+            return 0
+
+        case .dumpHIDRaw(let path):
+            // Every raw element value, as the JSON fixture `UPSHID.decode` is tested against.
+            let hid = UPSHID()
+            spin(1.0)
+            guard let raw = hid.fetch() else { fputs("no UPS over USB HID\n", stderr); return 1 }
+            let enc = JSONEncoder()
+            enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+            guard let data = try? enc.encode(raw) else { return 1 }
+            if path == "-" {
+                Swift.print(String(decoding: data, as: UTF8.self))
+            } else {
+                do { try data.write(to: URL(fileURLWithPath: path)) } catch { fputs("\(path): \(error)\n", stderr); return 1 }
+                Swift.print("wrote \(path): \(raw.values.count) values from \(raw.product ?? "?") in \(raw.readMillis) ms")
+            }
+            Swift.print("decodes to: \(summary(UPSHID.decode(raw, now: 0).reading))")
+            return 0
+
+        case .afterSafe(let action):
+            // The two after-safe actions have no other path to be exercised: the drill never
+            // performs them and a real outage is the wrong time to find out. Keyboard only.
+            guard isatty(0) != 0, isatty(1) != 0 else { fputs("--after-safe needs a terminal\n", stderr); return 2 }
+            let what: Policy.AfterSafe
+            switch action.lowercased() {
+            case "sleep": what = .sleep
+            case "shutdown", "shut-down": what = .shutDown
+            default: fputs("--after-safe takes sleep or shutdown\n", stderr); return 2
+            }
+            let word = what == .sleep ? "sleep" : "shutdown"
+            Swift.print(what == .sleep
+                ? "This puts the Mac to sleep now (IOPMSleepSystem, what pmset sleepnow does)."
+                : "This shuts the Mac down now through the shutdown Apple event to loginwindow: every app gets its unsaved-changes dialog, then the Mac powers off. Save your work first.")
+            Swift.print("Type \(word) to go ahead, anything else to stop: ", terminator: "")
+            guard let typed = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines), typed == word else { Swift.print("stopped"); return 1 }
+            Log.shared.persistToFile = true
+            Log.shared.append("--after-safe \(word): performing it at the owner's request from the terminal")
+            if what == .sleep { PowerActions.sleep() } else { PowerActions.shutDown() }
+            spin(2.0)
             return 0
 
         case .printMenu:

@@ -13,18 +13,18 @@ import UpsGuardCore
 /// left out by their partition type, and disk images (which DA also calls external) by their
 /// "Virtual Interface" protocol.
 @MainActor
-final class VolumeRegistry {
+public final class VolumeRegistry {
 
     /// All external volumes seen since launch (plus the ones remembered from earlier runs),
     /// attached or not.
-    private(set) var volumes: [String: VolumeState] = [:]
-    var onChange: (() -> Void)?
+    public private(set) var volumes: [String: VolumeState] = [:]
+    public var onChange: (() -> Void)?
 
     private let session: DASession
     private static let efi = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
     private static let appleBoot = "426F6F74-0000-11AA-AA11-00306543ECAC"
 
-    init(remembered: [VolumeState]) {
+    public init(remembered: [VolumeState]) {
         for v in remembered { volumes[v.uuid] = v }
         session = DASessionCreate(kCFAllocatorDefault)!
         DASessionScheduleWithRunLoop(session, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
@@ -46,8 +46,8 @@ final class VolumeRegistry {
     }
 
     /// The volumes currently mounted, for the menu.
-    var mounted: [VolumeState] { sorted.filter(\.isMounted) }
-    var sorted: [VolumeState] {
+    public var mounted: [VolumeState] { sorted.filter(\.isMounted) }
+    public var sorted: [VolumeState] {
         volumes.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
@@ -67,9 +67,8 @@ final class VolumeRegistry {
     }
 
     /// A `VolumeState` for an external, mountable volume; nil for everything else.
-    static func state(from d: [String: Any]) -> VolumeState? {
-        guard let uuidRef = d[kDADiskDescriptionVolumeUUIDKey as String] else { return nil }
-        guard let uuid = CFUUIDCreateString(nil, uuidRef as! CFUUID) as String? else { return nil }
+    public nonisolated static func state(from d: [String: Any]) -> VolumeState? {
+        guard let uuid = volumeUUID(d[kDADiskDescriptionVolumeUUIDKey as String]) else { return nil }
         if (d[kDADiskDescriptionDeviceInternalKey as String] as? Bool) == true { return nil }
         if (d[kDADiskDescriptionVolumeNetworkKey as String] as? Bool) == true { return nil }
         if (d[kDADiskDescriptionVolumeMountableKey as String] as? Bool) != true { return nil }
@@ -91,12 +90,23 @@ final class VolumeRegistry {
         return VolumeState(uuid: uuid, name: name, bsdName: bsd, mountPoint: path, isAttached: true, detail: parts.joined(separator: " · "))
     }
 
+    /// The volume UUID as a string: a CFUUID from Disk Arbitration, or a string (fixtures).
+    /// Checked by type id rather than cast, because a force cast on data from the OS is how
+    /// a daemon dies at 3 a.m.
+    nonisolated static func volumeUUID(_ ref: Any?) -> String? {
+        guard let ref else { return nil }
+        if let s = ref as? String { return s.isEmpty ? nil : s }
+        let cf = ref as CFTypeRef
+        guard CFGetTypeID(cf) == CFUUIDGetTypeID() else { return nil }
+        return CFUUIDCreateString(nil, (cf as! CFUUID)) as String?
+    }
+
     // MARK: Actions
 
     /// Unmount with force. `smbd` dissents a plain unmount of any volume with a share point on
     /// it, even with no client connected; force overrides dissenters and open files and still
     /// flushes the filesystem. Completes on the main thread.
-    func unmount(_ v: VolumeState, completion: @escaping (Result<Void, GuardError>) -> Void) {
+    public func unmount(_ v: VolumeState, completion: @escaping (Result<Void, GuardError>) -> Void) {
         guard let bsd = v.bsdName, let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, bsd) else {
             completion(.failure(GuardError("\(v.name) is not attached"))); return
         }
@@ -107,7 +117,7 @@ final class VolumeRegistry {
         }, box.toOpaque())
     }
 
-    func mount(_ v: VolumeState, completion: @escaping (Result<Void, GuardError>) -> Void) {
+    public func mount(_ v: VolumeState, completion: @escaping (Result<Void, GuardError>) -> Void) {
         guard let bsd = v.bsdName, let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, bsd) else {
             completion(.failure(GuardError("\(v.name) is not attached"))); return
         }

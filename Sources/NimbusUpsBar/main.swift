@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import AppKit
 import NimbusUpdater
+import NimbusUpsBarKit
 import UpsGuardCore
 
 // Nimbus UPS Bar — a menu bar guard that unmounts external drives before a UPS runs out. See
@@ -17,8 +18,10 @@ import UpsGuardCore
 //   --render-dmg-background DIR [--signed]   write the disk image's background PNGs and exit
 //   --dump-bar PATH         render just the status item to PATH, quit (layout check)
 //   --dump-chart PATH       render the chart with fake data to PATH, quit (layout check)
+//   --dump-hid-raw PATH     write every raw HID element value of the attached UPS as JSON (the decode fixture); "-" for stdout
 //
 // Command-line use of the same readers and guard (no UI):
+//   --after-safe sleep|shutdown   perform the after-safe action once, at the keyboard, after a typed confirmation
 //   --print                 everything the menu would show, as text; exit
 //   --print-menu            the menu itself, built against the real UPS and volumes, as an indented tree; exit
 //   --watch                 print readings and the guard's log as they happen (Ctrl-C to stop)
@@ -33,6 +36,7 @@ func usage() -> Never {
     usage: NimbusUpsBar [--enable-agent | --disable-agent | --agent-status | --agent-plist]
                         [--render-icon PATH [--size PX]] [--render-iconset DIR]
                         [--render-dmg-background DIR [--signed]] [--dump-bar PATH] [--dump-chart PATH]
+                        [--dump-hid-raw PATH] [--after-safe sleep|shutdown]
                         [--print | --print-menu | --watch | --simulate | --holders PATH | --volumes]
                         [--check-update | --preflight APP.app]
     """)
@@ -99,6 +103,8 @@ while !args.isEmpty {
             print("wrote \(path)")
         }
         exit(0)
+    case "--dump-hid-raw": cli = .dumpHIDRaw(path: takeValue(a))
+    case "--after-safe": cli = .afterSafe(action: takeValue(a))
     case "--print": cli = .print
     case "--print-menu": cli = .printMenu
     case "--watch": cli = .watch

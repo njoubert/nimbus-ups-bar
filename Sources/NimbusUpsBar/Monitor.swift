@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import AppKit
 import Foundation
+import NimbusUpsBarKit
 import UpsGuardCore
 
 /// The app's one source of truth: it reads the UPS (IOKit power sources every tick, the HID
@@ -75,7 +76,22 @@ final class UPSMonitor {
     private var timer: Timer?
     private var hidDue: TimeInterval = 0
     private var sampleDue: TimeInterval = 0
-    private var hidInFlight = false
+    /// When the HID read now in flight was started (nil: none). A read that has not come
+    /// back after `hidAbandonAfter` (a stalled USB transaction) is written off so the next
+    /// poll may start another; its result, if it ever lands, is dropped by sequence number.
+    private var hidStartedAt: TimeInterval?
+    private var hidSequence = 0
+    static let hidAbandonAfter: TimeInterval = 10
+    /// The live guard is not ticked before this moment: Disk Arbitration replays the mounted
+    /// volumes a beat after registration, and a guard that looks before the replay sees an
+    /// empty desk (and, resumed mid-outage with a sleep policy, would act on it).
+    private var armedAt: TimeInterval = .infinity
+    static let armDelay: TimeInterval = 3
+    /// The wall-clock start of the outage the live guard is in, so a relaunch mid-outage (a
+    /// crash restart, an update, toggling the agent) carries the clock on instead of
+    /// starting the grace period again.
+    static let outageStartKey = "outageStartedAt"
+    private var persistedOutage = false
     private let hidQueue = DispatchQueue(label: "com.njoubert.nimbusupsbar.hid", qos: .utility)
     private var observers: [NSObjectProtocol] = []
     private lazy var environment = RealEnvironment(monitor: self)
@@ -107,6 +123,16 @@ final class UPSMonitor {
     func start() {
         guard timer == nil else { return }
         log.append("Nimbus UPS Bar started: \(Bundle.main.bundlePath); policy \(policyText)")
+        armedAt = monotonicNow() + UPSMonitor.armDelay
+        if let began = UserDefaults.standard.object(forKey: UPSMonitor.outageStartKey) as? Date {
+            let ago = Date().timeIntervalSince(began)
+            if ago >= 0, ago < 12 * 3600 {
+                live.resumeElapsed = ago
+                log.append("the previous copy was mid-outage (began \(Duration.text(ago)) ago): resuming its clock if the UPS is still on battery")
+            } else {
+                UserDefaults.standard.removeObject(forKey: UPSMonitor.outageStartKey)
+            }
+        }
         power.start()
         let t = Timer(timeInterval: UPSMonitor.tickInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.poll(reason: nil) }
@@ -142,7 +168,8 @@ final class UPSMonitor {
         if snap.ups.present { upsSeen = true }
         lastPollAt = now
         let busy = snap.ups.onBattery || simulation != nil || menuOpen
-        if now >= hidDue, !hidInFlight, hid.isAttached {
+        let hidBusy = hidStartedAt.map { now - $0 < UPSMonitor.hidAbandonAfter } ?? false
+        if now >= hidDue, !hidBusy, hid.isAttached {
             hidDue = now + (busy ? UPSMonitor.tickInterval : UPSMonitor.sampleInterval)
             readHID(now: now)
         }
@@ -156,14 +183,17 @@ final class UPSMonitor {
     }
 
     private func readHID(now: TimeInterval) {
-        hidInFlight = true
+        if let s = hidStartedAt { log.append("a HID read started \(Duration.text(now - s)) ago has not returned; starting another") }
+        hidStartedAt = now
+        hidSequence += 1
+        let seq = hidSequence
         let hid = self.hid
         hidQueue.async {
             let report = hid.read(now: now)
             DispatchQueue.main.async { [weak self] in
                 MainActor.assumeIsolated {
-                    guard let self else { return }
-                    self.hidInFlight = false
+                    guard let self, seq == self.hidSequence else { return }
+                    self.hidStartedAt = nil
                     if let report {
                         self.hidReport = report
                         self.hidReadAt = monotonicNow()
@@ -175,17 +205,8 @@ final class UPSMonitor {
         }
     }
 
-    /// IOKit's entry decides whether a UPS exists and what state it is in; a fresh HID report
-    /// supplies the finer figures and takes over charge and runtime (seconds, not minutes).
     private func merge(iops: UPSReading, hid: UPSHID.Report?, hidAt: TimeInterval?, now: TimeInterval) -> UPSReading {
-        guard iops.present else { return iops }
-        guard let hid, let at = hidAt, now - at < UPSMonitor.hidFreshFor else { return iops }
-        var r = iops
-        if let c = hid.reading.chargePercent { r.chargePercent = c }
-        if let s = hid.reading.runtimeSeconds { r.runtimeSeconds = s }
-        r = r.merging(hid.reading)
-        r.flags = hid.reading.flags.union(iops.onBattery ? [.discharging] : [.acPresent])
-        return r
+        ReadingMerge.merge(iops: iops, hid: hid?.reading, hidAt: hidAt, now: now, freshFor: UPSMonitor.hidFreshFor)
     }
 
     private func record(_ r: UPSReading, now: TimeInterval) {
@@ -207,9 +228,21 @@ final class UPSMonitor {
             let simReading = sim.outage.reading(realNow: now, monotonicStamp: now)
             sim.guardian.tick(simReading)
             advanceSimulation(sim, now: now)
-            if sim.kind == .rehearsal { live.tick(reading) }
+            if sim.kind == .rehearsal { tickLive(now: now) }
         } else {
-            live.tick(reading)
+            tickLive(now: now)
+        }
+    }
+
+    private func tickLive(now: TimeInterval) {
+        guard now >= armedAt else { return }
+        if armedAt.isFinite, armedAt > 0 { armedAt = 0; log.append("guard armed: \(volumes.mounted.count) external volume\(volumes.mounted.count == 1 ? "" : "s") mounted") }
+        live.tick(reading)
+        let inOutage = live.status.outageStart != nil
+        if inOutage != persistedOutage {
+            persistedOutage = inOutage
+            if inOutage { UserDefaults.standard.set(Date(timeIntervalSinceNow: -live.status.elapsed), forKey: UPSMonitor.outageStartKey) }
+            else { UserDefaults.standard.removeObject(forKey: UPSMonitor.outageStartKey) }
         }
     }
 
@@ -324,11 +357,10 @@ final class UPSMonitor {
             left = st.volumes.filter(\.unmountedByGuard).map(\.volume.name)
         }
         log.append("\(sim.kind.rawValue) \(reason)\(left.isEmpty ? "" : "; still unmounted: \(left.joined(separator: ", ")) (use the volume's Mount item)")")
-        if sim.kind == .rehearsal, let env = (sim.guardian as AnyObject) as? OutageGuard, env === sim.guardian {
-            // Nothing to undo: a rehearsal touched nothing.
-        }
         simulation = nil
-        PowerActions.holdAwake(false)
+        // The sleep assertion is process-wide and a drill's guard shares it with the live
+        // guard, which may be mid-outage right now: release it only when nothing live needs it.
+        if ![.holding, .soft, .hard].contains(live.status.phase) { PowerActions.holdAwake(false) }
         live.tick(reading)
         onChange?()
     }

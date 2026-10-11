@@ -7,33 +7,33 @@ import UpsGuardCore
 /// each a line in the menu with a dot: green for fine, a hollow grey for a note that needs no
 /// action (recharging, self-test not run), yellow for look-into-it, red for a fault. Nothing
 /// here is an alarm the UPS raised on its own except the flags it reports.
-enum Health {
-    enum Level: Int, Comparable {
+public enum Health {
+    public enum Level: Int, Comparable {
         case good, info, warning, bad
-        static func < (a: Level, b: Level) -> Bool { a.rawValue < b.rawValue }
+        public static func < (a: Level, b: Level) -> Bool { a.rawValue < b.rawValue }
         /// Notes do not colour anything; only warnings and faults do.
-        var isConcern: Bool { self >= .warning }
+        public var isConcern: Bool { self >= .warning }
     }
 
-    struct Item: Equatable {
-        let level: Level
-        let text: String
-        let detail: String?
-        init(_ level: Level, _ text: String, _ detail: String? = nil) { self.level = level; self.text = text; self.detail = detail }
+    public struct Item: Equatable {
+        public let level: Level
+        public let text: String
+        public let detail: String?
+        public init(_ level: Level, _ text: String, _ detail: String? = nil) { self.level = level; self.text = text; self.detail = detail }
     }
 
-    static func overall(_ items: [Item]) -> Level { items.map(\.level).max() ?? .good }
+    public static func overall(_ items: [Item]) -> Level { items.map(\.level).max() ?? .good }
 
     /// The item that sets the overall level, for the menu row and the headline: the first
     /// warning or fault, or nil when everything is fine.
-    static func headline(_ items: [Item]) -> Item? {
+    public static func headline(_ items: [Item]) -> Item? {
         let top = overall(items)
         guard top.isConcern else { return nil }
         return items.first { $0.level == top }
     }
 
-    static func assess(reading r: UPSReading, hidAge: TimeInterval?, hidAttached: Bool, upsSeen: Bool,
-                       internalBattery: PowerSources.InternalBattery?, protectedMounted: Int) -> [Item] {
+    public static func assess(reading r: UPSReading, hidAge: TimeInterval?, hidAttached: Bool, upsSeen: Bool,
+                              internalBattery: PowerSources.InternalBattery?, protectedMounted: Int, staleAfter: TimeInterval = 60) -> [Item] {
         var out: [Item] = []
         guard r.present else {
             out.append(Item(.bad, upsSeen ? "UPS has disconnected" : "No UPS found",
@@ -115,7 +115,7 @@ enum Health {
         if r.flags.contains(.buck) { out.append(Item(.warning, "Trimming a high line voltage")) }
         if hidAttached {
             if let age = hidAge {
-                if age > 60 { out.append(Item(.warning, "UPS not answering over USB for \(Duration.text(age))", "macOS still lists it, but direct reads are failing. A cable or hub problem.")) }
+                if age > staleAfter { out.append(Item(.warning, "UPS not answering over USB for \(Duration.text(age))", "macOS still lists it, but direct reads are failing. A cable or hub problem.")) }
             } else {
                 out.append(Item(.info, "UPS details not read yet"))
             }

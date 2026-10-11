@@ -11,26 +11,30 @@ import UpsGuardCore
 /// Changes arrive through `IOPSNotificationCreateRunLoopSource` on the main run loop, so a
 /// transfer to battery is seen within a second rather than at the next poll.
 @MainActor
-final class PowerSources {
+public final class PowerSources {
 
-    struct InternalBattery: Equatable {
-        var percent: Int
-        var isCharging: Bool
-        var onAC: Bool
-        var minutesToEmpty: Int?
+    public struct InternalBattery: Equatable {
+        public var percent: Int
+        public var isCharging: Bool
+        public var onAC: Bool
+        public var minutesToEmpty: Int?
+        public init(percent: Int, isCharging: Bool, onAC: Bool, minutesToEmpty: Int? = nil) {
+            self.percent = percent; self.isCharging = isCharging; self.onAC = onAC; self.minutesToEmpty = minutesToEmpty
+        }
     }
 
-    struct Snapshot: Equatable {
-        var ups: UPSReading
-        var internalBattery: InternalBattery?
+    public struct Snapshot: Equatable {
+        public var ups: UPSReading
+        public var internalBattery: InternalBattery?
         /// "AC Power" or "Battery Power": what the Mac itself is drawing from.
-        var providing: String
+        public var providing: String
     }
 
-    var onChange: (() -> Void)?
+    public var onChange: (() -> Void)?
+    public init() {}
     private var source: CFRunLoopSource?
 
-    func start() {
+    public func start() {
         guard source == nil else { return }
         let ctx = Unmanaged.passUnretained(self).toOpaque()
         guard let s = IOPSNotificationCreateRunLoopSource({ ctx in
@@ -42,13 +46,13 @@ final class PowerSources {
         source = s
     }
 
-    func stop() {
+    public func stop() {
         if let s = source { CFRunLoopRemoveSource(CFRunLoopGetMain(), s, .commonModes) }
         source = nil
     }
 
     /// One read of every power source. `now` is the monotonic stamp for the reading.
-    nonisolated static func read(now: TimeInterval) -> Snapshot {
+    public nonisolated static func read(now: TimeInterval) -> Snapshot {
         let blob = IOPSCopyPowerSourcesInfo().takeRetainedValue()
         let list = IOPSCopyPowerSourcesList(blob).takeRetainedValue() as [CFTypeRef]
         let providing = IOPSGetProvidingPowerSourceType(blob).map { $0.takeUnretainedValue() as String } ?? "AC Power"
@@ -88,7 +92,7 @@ final class PowerSources {
     }
 
     /// The raw UPS dictionary, for the details submenu and `--print`.
-    nonisolated static func rawUPSDescription() -> [(String, String)] {
+    public nonisolated static func rawUPSDescription() -> [(String, String)] {
         let blob = IOPSCopyPowerSourcesInfo().takeRetainedValue()
         let list = IOPSCopyPowerSourcesList(blob).takeRetainedValue() as [CFTypeRef]
         for ps in list {
@@ -102,6 +106,6 @@ final class PowerSources {
 
 /// Monotonic seconds that keep counting through sleep. Wall-clock time can step backwards
 /// (NTP) and would stall a deadline.
-func monotonicNow() -> TimeInterval {
+public func monotonicNow() -> TimeInterval {
     Double(clock_gettime_nsec_np(CLOCK_MONOTONIC)) / 1e9
 }

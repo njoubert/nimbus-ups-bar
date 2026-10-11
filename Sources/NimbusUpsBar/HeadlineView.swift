@@ -1,6 +1,7 @@
 // Copyright (C) 2026 Niels Joubert
 // SPDX-License-Identifier: GPL-3.0-or-later
 import AppKit
+import NimbusUpsBarKit
 import UpsGuardCore
 
 /// The top of the menu: the phase in words, with its colour, and under it three figures:

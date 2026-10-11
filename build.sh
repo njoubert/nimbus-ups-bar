@@ -237,11 +237,14 @@ APPLESCRIPT
   note "packed $out ($(du -h "$out" | cut -f1))"
 }
 
-# Quit every running copy and wait for it to go away.
+# Quit every running copy and wait for it to go away. A clean quit (exit 0), not a signal:
+# the launchd agent's KeepAlive treats a signal death as a crash and restarts the copy ten
+# seconds later, which would then (newest copy wins) quit whatever this script launches next.
+# The quit Apple event needs no Automation permission.
 stop_all() {
   if pgrep -x "$NAME" >/dev/null; then
-    pkill -x "$NAME" || true
-    for _ in $(seq 1 30); do pgrep -x "$NAME" >/dev/null || break; sleep 0.1; done
+    osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || pkill -x "$NAME" || true
+    for _ in $(seq 1 50); do pgrep -x "$NAME" >/dev/null || break; sleep 0.1; done
     pgrep -x "$NAME" >/dev/null && { warn "still running, killing"; pkill -9 -x "$NAME" || true; sleep 0.3; }
     say "stopped $NAME"
   else
@@ -345,6 +348,9 @@ case "$cmd" in
     stop_all
     if [ -e "$INSTALLED" ]; then
       note "replacing $INSTALLED"
+      # Unregister the old bundle's agent first, so launchd is not pointed at a path that is
+      # about to vanish and --enable-agent below registers fresh rather than twice.
+      "$INSTALLED/Contents/MacOS/$NAME" --disable-agent >/dev/null 2>&1 || true
       rm -rf "$INSTALLED"
     fi
     ditto "$REL_APP" "$INSTALLED"

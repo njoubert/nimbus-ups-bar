@@ -1,6 +1,7 @@
 // Copyright (C) 2026 Niels Joubert
 // SPDX-License-Identifier: GPL-3.0-or-later
 import AppKit
+import NimbusUpsBarKit
 import UpsGuardCore
 
 /// The last hour of the UPS, as two small panels on one time axis: the load in watts on top,

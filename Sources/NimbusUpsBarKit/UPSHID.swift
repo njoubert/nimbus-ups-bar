@@ -12,25 +12,54 @@ import UpsGuardCore
 ///
 /// Elements are keyed by the collection they sit in as well as their usage, because the same
 /// usage (`Voltage`, 0x84/0x30) appears under Input, Output and the battery's PowerSummary.
-final class UPSHID: @unchecked Sendable {
+public final class UPSHID: @unchecked Sendable {
 
-    struct Field: Equatable {
-        let section: String
-        let label: String
-        let value: String
-        let raw: Int
+    public struct Field: Equatable {
+        public let section: String
+        public let label: String
+        public let value: String
+        public let raw: Int
     }
 
-    struct Report: Equatable {
-        var reading: UPSReading
-        var fields: [Field]
-        var readMillis: Int
+    public struct Report: Equatable {
+        public var reading: UPSReading
+        public var fields: [Field]
+        public var readMillis: Int
+        public init(reading: UPSReading, fields: [Field] = [], readMillis: Int = 0) {
+            self.reading = reading; self.fields = fields; self.readMillis = readMillis
+        }
     }
 
-    private struct Key: Hashable {
-        let section: UInt32   // the enclosing collection's usage on page 0x84 (0x1A input, 0x1C output, 0x24 summary…)
-        let page: UInt32
-        let usage: UInt32
+    /// One element: the enclosing collection's usage on page 0x84 (0x1A input, 0x1C output,
+    /// 0x24 summary…), the usage page, the usage.
+    public struct Key: Hashable, Codable {
+        public let section: UInt32
+        public let page: UInt32
+        public let usage: UInt32
+        public init(section: UInt32, page: UInt32, usage: UInt32) { self.section = section; self.page = page; self.usage = usage }
+    }
+
+    /// Everything the device returned, undecoded: what `fetch()` reads over USB and what
+    /// `decode(_:now:)` turns into a `Report`. Serialised by `--dump-hid-raw` as the fixture
+    /// the decode is tested against; a second UPS model is a second fixture.
+    public struct RawReport: Codable, Equatable {
+        public struct Value: Codable, Equatable {
+            public var section: UInt32
+            public var page: UInt32
+            public var usage: UInt32
+            public var value: Int
+            public init(section: UInt32, page: UInt32, usage: UInt32, value: Int) {
+                self.section = section; self.page = page; self.usage = usage; self.value = value
+            }
+        }
+        public var product: String?
+        public var manufacturer: String?
+        public var serial: String?
+        public var values: [Value]
+        public var readMillis: Int
+        public init(product: String?, manufacturer: String?, serial: String?, values: [Value], readMillis: Int = 0) {
+            self.product = product; self.manufacturer = manufacturer; self.serial = serial; self.values = values; self.readMillis = readMillis
+        }
     }
 
     private let manager: IOHIDManager
@@ -39,11 +68,11 @@ final class UPSHID: @unchecked Sendable {
     private var elements: [(key: Key, element: IOHIDElement)] = []
     private var deviceInfo: (product: String?, manufacturer: String?, serial: String?) = (nil, nil, nil)
     /// Main thread; true when a UPS arrived, false when it went.
-    var onDeviceChange: ((Bool) -> Void)?
+    public var onDeviceChange: ((Bool) -> Void)?
 
-    var isAttached: Bool { lock.withLock { device != nil } }
+    public var isAttached: Bool { lock.withLock { device != nil } }
 
-    init() {
+    public init() {
         manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
         // HID Power Device page, usage UPS.
         IOHIDManagerSetDeviceMatching(manager, [kIOHIDDeviceUsagePageKey: 0x84, kIOHIDDeviceUsageKey: 0x04] as CFDictionary)
@@ -108,14 +137,13 @@ final class UPSHID: @unchecked Sendable {
 
     // MARK: Reading
 
-    /// Read every element once. Safe to call from any thread; blocks on USB for ~30 ms.
-    /// nil when no UPS is attached.
-    func read(now: TimeInterval) -> Report? {
+    /// Every element once, raw, straight from the device. Safe to call from any thread;
+    /// blocks on USB for ~30 ms. nil when no UPS is attached.
+    public func fetch() -> RawReport? {
         let (dev, els, info) = lock.withLock { (device, elements, deviceInfo) }
         guard let dev else { return nil }
         let t0 = Date()
-        var raw: [Key: Int] = [:]
-        var fields: [Field] = []
+        var values: [RawReport.Value] = []
         for (key, e) in els {
             // "With update": go to the device for every element. The plain call returns the
             // cached value for Input-type elements, and the ones the UPS does not push on its
@@ -124,25 +152,42 @@ final class UPSHID: @unchecked Sendable {
             let placeholder = IOHIDValueCreateWithIntegerValue(kCFAllocatorDefault, e, 0, 0)
             var holder: Unmanaged<IOHIDValue> = Unmanaged.passUnretained(placeholder)
             guard IOHIDDeviceGetValueWithOptions(dev, e, &holder, 0x00020000 /* kIOHIDDeviceGetValueWithUpdate */) == kIOReturnSuccess else { continue }
-            let v = Int(IOHIDValueGetIntegerValue(holder.takeUnretainedValue()))
-            raw[key] = v
+            values.append(RawReport.Value(section: key.section, page: key.page, usage: key.usage, value: Int(IOHIDValueGetIntegerValue(holder.takeUnretainedValue()))))
+        }
+        guard !values.isEmpty else { return nil }
+        return RawReport(product: info.product, manufacturer: info.manufacturer, serial: info.serial, values: values,
+                         readMillis: Int(Date().timeIntervalSince(t0) * 1000))
+    }
+
+    /// `fetch()` then `decode`: the report the monitor uses. nil when no UPS is attached.
+    public func read(now: TimeInterval) -> Report? {
+        fetch().map { UPSHID.decode($0, now: now) }
+    }
+
+    /// The raw element values as a reading and as labelled fields. Pure: the quirks (battery
+    /// volts in tenths, AC-present versus discharging, the self-test codes, the summary-or-
+    /// battery section fallback, load from percent when no wattage is reported) are all here.
+    public static func decode(_ raw: RawReport, now: TimeInterval) -> Report {
+        var map: [Key: Int] = [:]
+        var fields: [Field] = []
+        for v in raw.values {
+            let key = Key(section: v.section, page: v.page, usage: v.usage)
+            map[key] = v.value
             // String-index usages (iProduct, iSerial, chemistry…) are USB string table slots,
             // not values; the device properties carry the strings themselves.
             if UPSHID.stringIndexes.contains(key.page << 8 | key.usage) { continue }
-            fields.append(Field(section: UPSHID.sectionName(key.section), label: UPSHID.label(key), value: UPSHID.format(key, v), raw: v))
+            fields.append(Field(section: UPSHID.sectionName(key.section), label: UPSHID.label(key), value: UPSHID.format(key, v.value), raw: v.value))
         }
-        guard !raw.isEmpty else { return nil }
-        let millis = Int(Date().timeIntervalSince(t0) * 1000)
 
-        func get(_ section: UInt32, _ page: UInt32, _ usage: UInt32) -> Int? { raw[Key(section: section, page: page, usage: usage)] }
+        func get(_ section: UInt32, _ page: UInt32, _ usage: UInt32) -> Int? { map[Key(section: section, page: page, usage: usage)] }
         /// A battery-page or summary value that may live under PowerSummary (0x24) or Battery (0x12).
         func batt(_ page: UInt32, _ usage: UInt32) -> Int? { get(0x24, page, usage) ?? get(0x12, page, usage) }
         let input: UInt32 = 0x1A, output: UInt32 = 0x1C
 
         var r = UPSReading(present: true, timestamp: now)
-        r.name = info.product
-        r.manufacturer = info.manufacturer
-        r.serialNumber = info.serial
+        r.name = raw.product
+        r.manufacturer = raw.manufacturer
+        r.serialNumber = raw.serial
         if let ac = batt(0x85, 0xD0) { r.onBattery = ac == 0; if ac != 0 { r.flags.insert(.acPresent) } }
         else if let d = batt(0x85, 0x45) { r.onBattery = d != 0 }
         r.chargePercent = batt(0x85, 0x66)
@@ -156,12 +201,12 @@ final class UPSHID: @unchecked Sendable {
         if let v = get(output, 0x84, 0x30) { r.outputVoltage = Double(v) }
         if let v = batt(0x84, 0x30) { r.batteryVoltage = UPSHID.batteryVolts(v) }
         if let v = batt(0x84, 0x40) { r.batteryNominalVoltage = UPSHID.batteryVolts(v) }
-        let flagMap: [(UInt32, UInt32, UPSReading.Flags, Bool)] = [   // page, usage, flag, battery section?
-            (0x85, 0x44, .charging, true), (0x85, 0x45, .discharging, true), (0x85, 0x46, .fullyCharged, true),
-            (0x85, 0x42, .belowCapacityLimit, true), (0x85, 0x43, .runtimeLimitExpired, true),
-            (0x85, 0x4B, .needsReplacement, true), (0x84, 0x69, .shutdownImminent, true),
+        let flagMap: [(UInt32, UInt32, UPSReading.Flags)] = [
+            (0x85, 0x44, .charging), (0x85, 0x45, .discharging), (0x85, 0x46, .fullyCharged),
+            (0x85, 0x42, .belowCapacityLimit), (0x85, 0x43, .runtimeLimitExpired),
+            (0x85, 0x4B, .needsReplacement), (0x84, 0x69, .shutdownImminent),
         ]
-        for (page, usage, flag, _) in flagMap where (batt(page, usage) ?? 0) != 0 { r.flags.insert(flag) }
+        for (page, usage, flag) in flagMap where (batt(page, usage) ?? 0) != 0 { r.flags.insert(flag) }
         if (get(output, 0x84, 0x65) ?? 0) != 0 { r.flags.insert(.overload) }
         if (get(output, 0x84, 0x69) ?? 0) != 0 { r.flags.insert(.shutdownImminent) }
         if (get(output, 0x84, 0x6E) ?? 0) != 0 { r.flags.insert(.boost) }
@@ -172,12 +217,12 @@ final class UPSHID: @unchecked Sendable {
         if let t = get(output, 0x84, 0x58) ?? get(0x24, 0x84, 0x58) { r.selfTest = UPSReading.SelfTest(rawValue: t) }
         if let v = get(output, 0x84, 0x53) { r.lowTransferVoltage = Double(v) }
         if let v = get(output, 0x84, 0x54) { r.highTransferVoltage = Double(v) }
-        return Report(reading: r, fields: fields, readMillis: millis)
+        return Report(reading: r, fields: fields, readMillis: raw.readMillis)
     }
 
     /// CyberPower reports battery volts in tenths once the figure has two digits (271 for a
     /// 24 V pack at 27.1 V; 240 for the nominal), the same quirk NUT corrects for.
-    private static func batteryVolts(_ raw: Int) -> Double {
+    public static func batteryVolts(_ raw: Int) -> Double {
         raw >= 100 ? Double(raw) / 10 : Double(raw)
     }
 
@@ -191,7 +236,7 @@ final class UPSHID: @unchecked Sendable {
     /// (`kIOReturnUnsupported`); the device accepts a SET_REPORT of that report ID as a
     /// feature report, which is what NUT sends. The buffer carries the report ID as its first
     /// byte, the convention IOKit (and hidapi) use for numbered reports.
-    func startQuickSelfTest() -> Result<Void, GuardError> {
+    public func startQuickSelfTest() -> Result<Void, GuardError> {
         let (dev, els) = lock.withLock { (device, elements) }
         guard let dev else { return .failure(GuardError("no UPS over USB HID")) }
         guard let e = els.first(where: { $0.key.page == 0x84 && $0.key.usage == 0x58 })?.element else {

@@ -18,12 +18,27 @@ let package = Package(
         // *what* to do lives here so it can be driven by fakes in the tests.
         .target(name: "UpsGuardCore"),
         .testTarget(name: "UpsGuardCoreTests", dependencies: ["UpsGuardCore"]),
-        // The menu bar app: IOKit power sources and HID, Disk Arbitration, the menu, the
-        // chart, the launchd agent. build.sh wraps the binary into Nimbus UPS Bar.app.
+        // The platform layer the app is built on, as a library so its logic is testable: the
+        // IOKit power sources, the UPS over HID (fetch and decode, separately), Disk
+        // Arbitration, who holds a volume, the health rules, the IOKit+HID merge. The decode,
+        // the health rules and the volume filter run in CI against fixtures, no UPS needed.
+        .target(
+            name: "NimbusUpsBarKit",
+            dependencies: ["UpsGuardCore"],
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("IOKit"),
+                .linkedFramework("DiskArbitration"),
+            ]
+        ),
+        .testTarget(name: "NimbusUpsBarKitTests", dependencies: ["NimbusUpsBarKit"], resources: [.copy("Fixtures")]),
+        // The menu bar app: the monitor, the menu, the chart, the settings, the launchd
+        // agent. build.sh wraps the binary into Nimbus UPS Bar.app.
         .executableTarget(
             name: "NimbusUpsBar",
             dependencies: [
                 "UpsGuardCore",
+                "NimbusUpsBarKit",
                 .product(name: "NimbusUpdater", package: "nimbus-updater"),
             ],
             linkerSettings: [
