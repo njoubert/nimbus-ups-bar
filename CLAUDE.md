@@ -134,8 +134,8 @@ Sources/NimbusUpsBar/        the app
   ChartView.swift            load and charge, two panels, time ticks, newest values in the headers,
                              the charge limit, outage bands, hover readout
   AppIcon.swift, DMGBackground.swift, Updates.swift   as in the siblings
-Tests/UpsGuardCoreTests/     76 scenarios against FakeEnvironment, each rehearsal scenario among them
-Tests/NimbusUpsBarKitTests/  62 checks: the HID decode against both CP1500 fixtures and
+Tests/UpsGuardCoreTests/     77 scenarios against FakeEnvironment, each rehearsal scenario among them
+Tests/NimbusUpsBarKitTests/  63 checks: the HID decode against both CP1500 fixtures and
                              hand-made maps, every health rule (and that each menu row fits), the
                              DA dictionary filter, the holder resolver, the merge, the Inspector's
                              sections, JSON and diff, the launchctl parser, the log-line kinds
@@ -155,7 +155,7 @@ main.
 
 ```
 ./build.sh run [--fg]         debug build as dist/debug/Nimbus UPS Bar.app (quits any running copy first)
-./build.sh test               swift test: the 76 guard scenarios and the 62 platform checks
+./build.sh test               swift test: the 77 guard scenarios and the 63 platform checks
 ./build.sh install            release → /Applications, register the agent (owner's call), launch
 .build/debug/NimbusUpsBar --print        the UPS, health, every HID field, volumes, holders, policy
 .build/debug/NimbusUpsBar --print-menu   the menu built against the real UPS, as an indented tree
