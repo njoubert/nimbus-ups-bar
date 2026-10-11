@@ -268,18 +268,22 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
         extra2.isHidden = true
         let buttons = NSStackView(views: [extra, extra2, mode, copied, copyAll])
         buttons.spacing = 8
-        let header = NSStackView(views: [titles, buttons])
-        header.distribution = .fill
-        header.alignment = .centerY
-        titles.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        // The buttons are pinned to the right edge, so they stay put in every section whatever
+        // the title and subtitle say; "Copied" does not resize its button either. A section's
+        // own buttons (Show Progress, Open Log File…) grow leftwards from the segmented control.
         titles.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        subtitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         buttons.setContentHuggingPriority(.required, for: .horizontal)
-        for x in [header, tableScroll, textScroll, logScroll] as [NSView] { x.translatesAutoresizingMaskIntoConstraints = false; v.addSubview(x) }
+        copied.widthAnchor.constraint(equalToConstant: 76).isActive = true
+        copyAll.widthAnchor.constraint(equalToConstant: 84).isActive = true
+        for x in [titles, buttons, tableScroll, textScroll, logScroll] as [NSView] { x.translatesAutoresizingMaskIntoConstraints = false; v.addSubview(x) }
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: v.safeAreaLayoutGuide.topAnchor, constant: 12),
-            header.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 20),
-            header.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -16),
-            tableScroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 12),
+            titles.topAnchor.constraint(equalTo: v.safeAreaLayoutGuide.topAnchor, constant: 12),
+            titles.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 20),
+            titles.trailingAnchor.constraint(lessThanOrEqualTo: buttons.leadingAnchor, constant: -16),
+            buttons.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -16),
+            buttons.centerYAnchor.constraint(equalTo: titles.centerYAnchor),
+            tableScroll.topAnchor.constraint(equalTo: titles.bottomAnchor, constant: 12),
             tableScroll.leadingAnchor.constraint(equalTo: v.leadingAnchor),
             tableScroll.trailingAnchor.constraint(equalTo: v.trailingAnchor),
             tableScroll.bottomAnchor.constraint(equalTo: v.bottomAnchor),
@@ -379,6 +383,7 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
             }
             lines = out
         }
+        subtitle.toolTip = subtitle.stringValue
         if showingJSON {
             let json = Inspector.json(currentJSON())
             if force || text.string != json {
@@ -434,6 +439,7 @@ final class InspectorDetail: NSViewController, NSTableViewDataSource, NSTableVie
         let mb = Double(size) / 1_000_000
         subtitle.stringValue = "\(url.path) · \(String(format: mb < 0.1 ? "%.0f KB" : "%.1f MB", mb < 0.1 ? Double(size) / 1000 : mb))"
             + (size > InspectorDetail.logTail ? " · showing the last 2 MB" : "") + " · ⌘F to search"
+        subtitle.toolTip = subtitle.stringValue
     }
 
     @objc private func copyAll(_ sender: NSButton) {
