@@ -1,0 +1,11 @@
+.build/
+dist/
+.swiftpm/
+*.xcodeproj
+xcuserdata/
+DerivedData/
+.DS_Store
+.signing
+
+# A local symlink into ~/Troubleshoot (the investigation this grew from); not for the public repo.
+2026-10-10-macbookpro-ups-outage-guard

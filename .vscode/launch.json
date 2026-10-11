@@ -1,0 +1,14 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:nimbus-ups-bar}",
+            "name": "Debug NimbusUpsBar",
+            "target": "NimbusUpsBar",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug NimbusUpsBar"
+        }
+    ]
+}
