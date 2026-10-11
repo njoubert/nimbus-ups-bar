@@ -65,8 +65,9 @@ charge, load in watts, runtime (the UPS's own estimate at the current load). Top
 those figures are and how often they are read: every 10 s on line power, every 2 s on battery and
 while the menu is open, both adjustable (the line/battery state itself arrives from macOS the
 moment it changes). Then a chart of the **last hour** (up to a day, in Settings) in two panels on
-one time axis, load above and battery charge below, with minutes on battery tinted; hover for the
-values at any moment. Then:
+one time axis, load above and battery charge below, each headed by its newest value, with minutes
+on battery tinted and the charge limit (when on) drawn as a dashed line; hover for the values at
+any moment. Then:
 
 - **Protected Volumes**: every external volume, with a dot (green mounted, yellow unmounted or
   being worked on, red detached) and who has files open on it. Each has a submenu with *Unmount

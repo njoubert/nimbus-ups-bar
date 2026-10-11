@@ -21,7 +21,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private var menuOpen = false
     private var liveTimer: Timer?
 
-    private static let chartWidth: CGFloat = 340
+    static let chartWidth: CGFloat = 340
     private let headline = HeadlineView(frame: NSRect(x: 0, y: 0, width: chartWidth, height: HeadlineView.height))
     private let chart = ChartView(frame: NSRect(x: 0, y: 0, width: chartWidth, height: ChartView.chartHeight))
     private var actionItems: [String: NSMenuItem] = [:]
@@ -55,6 +55,8 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         let s = Settings.shared
         chart.span = s.historyWindow
         chart.sampleGap = s.lineReadInterval * 3
+        chart.chargeLimit = s.policy.hardAtPercent
+        chart.needsDisplay = true
         headline.toolTip = "Charge, load and voltages come from a USB read of the UPS: every \(Int(s.lineReadInterval)) s on line power, every \(Int(s.busyReadInterval)) s on battery and while this menu is open (Settings › Readings). "
             + "The line/battery state also arrives from macOS the moment it changes. The top-right figure is the age of what you see."
         lastBar = nil
