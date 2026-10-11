@@ -59,12 +59,14 @@ README before changing the policy or the stages.
   screen: `--dump-chart`, `--dump-settings`, `--dump-bar`, `--render-dmg-background`; for what
   they do not cover (the open menu as a whole), ask the owner for one.
 - **Where the images live:** `gh` cannot upload images into a PR body, so they go on the orphan
-  branch `pr-assets` (never merged; nothing else on it), under `pr-<number>/`, and the description
-  links them as `https://raw.githubusercontent.com/njoubert/nimbus-ups-bar/pr-assets/pr-<number>/<file>.png`
-  (the repo is public, so they render). Push them with a worktree so the working branch is not
-  disturbed: `git worktree add <scratch dir> pr-assets`, copy,
-  commit, push, `git worktree remove`. Add the images after `gh pr create` gives the number,
-  then `gh pr edit <n> --body-file …`.
+  branch `pr-assets` (never merged; screenshots and the repo's `.pre-commit-config.yaml`, so its
+  commits pass the hooks like any other), under `pr-<number>/`. Push them with a worktree so the
+  working branch is not disturbed (`git worktree add <scratch dir> pr-assets`, copy, commit, push,
+  `git worktree remove`), then link them by the commit's SHA:
+  `https://raw.githubusercontent.com/njoubert/nimbus-ups-bar/<sha>/pr-<number>/<file>.png` (the
+  repo is public, so they render). Not by the branch name: raw.githubusercontent caches a 404 for
+  minutes, and a SHA link never changes under the PR. Add the images after `gh pr create` gives
+  the number, then `gh pr edit <n> --body-file …`.
 
 ## Layout
 
