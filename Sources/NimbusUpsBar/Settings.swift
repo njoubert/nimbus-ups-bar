@@ -15,20 +15,21 @@ final class Settings {
     private let d = UserDefaults.standard
     var onChange: (() -> Void)?
 
+    private init() { migrateLegacyPolicy() }
+
     enum Key {
-        static let grace = "graceSeconds"
-        static let hardAfter = "hardAfterSeconds"
-        static let hardAtPercent = "hardAtPercent"
-        static let hardAtPercentOn = "hardAtPercentEnabled"
-        static let hardAtRuntime = "hardAtRuntimeSeconds"
-        static let hardAtRuntimeOn = "hardAtRuntimeEnabled"
         static let ignoreReadings = "ignoreReadingsSeconds"
         static let lineStable = "lineStableSeconds"
         static let quitApps = "quitApps"
         static let quitTimeout = "quitTimeoutSeconds"
         static let quitTimeoutOn = "quitTimeoutEnabled"
         static let neverQuit = "neverQuit"
-        static let afterSafe = "afterSafe"
+        static let powerDownWhenSafe = "powerDownWhenSafe"
+        static let powerDownAction = "powerDownAction"
+        static let upsGone = "upsGoneSeconds"
+        static let upsGoneInOutage = "upsGoneInOutage"
+        static let upsGoneInOutagePowersDown = "upsGoneInOutagePowersDown"
+        static let upsGoneOnLine = "upsGoneOnLine"
         static let volumeMode = "volumeMode"
         static let selectedVolumes = "selectedVolumeUUIDs"
         static let knownVolumes = "knownVolumes"
@@ -38,9 +39,58 @@ final class Settings {
         static let busyRead = "busyReadSeconds"
         static let history = "chartHistorySeconds"
         static let postpone = "postponeSeconds"
-        static let policyKeys = [grace, hardAfter, hardAtPercent, hardAtPercentOn, hardAtRuntime, hardAtRuntimeOn,
-                                 ignoreReadings, lineStable, quitApps, quitTimeout, quitTimeoutOn, neverQuit, afterSafe]
-        static let readingKeys = [lineRead, busyRead, history, showLoadInBar]
+        static let policyKeys = [ignoreReadings, lineStable, quitApps, quitTimeout, quitTimeoutOn, neverQuit,
+                                 powerDownWhenSafe, powerDownAction, upsGone, upsGoneInOutage, upsGoneInOutagePowersDown, upsGoneOnLine]
+            + Stage.allCases.flatMap { st in Condition.allCases.flatMap { c in [st.key(c), st.key(c) + "On"] } }
+        static let readingKeys = [lineRead, busyRead, history, showLoadInBar, ignoreReadings, lineStable]
+    }
+
+    /// The three stages of the policy, each a `Trigger` stored as three value + on/off pairs
+    /// ("hardRuntime" = 600, "hardRuntimeOn" = true), so turning a condition off and on again
+    /// brings its number back.
+    enum Stage: String, CaseIterable {
+        case soft, hard, powerDown
+
+        func key(_ c: Condition) -> String { rawValue + c.rawValue }
+
+        func trigger(of p: Policy) -> Trigger {
+            switch self { case .soft: return p.softAt; case .hard: return p.hardAt; case .powerDown: return p.powerDownAt }
+        }
+        func set(_ t: Trigger, in p: inout Policy) {
+            switch self { case .soft: p.softAt = t; case .hard: p.hardAt = t; case .powerDown: p.powerDownAt = t }
+        }
+        /// The number a field shows while its condition is off and nothing was ever stored.
+        func fallback(_ c: Condition) -> Double {
+            if let v = Condition.value(c, of: trigger(of: Policy())) { return v }
+            switch (self, c) {
+            case (.soft, .time): return 120
+            case (.hard, .time): return 300
+            case (.powerDown, .time): return 1200
+            case (.powerDown, .runtime): return 300
+            case (.powerDown, .charge): return 20
+            case (_, .runtime): return 600
+            case (_, .charge): return 50
+            }
+        }
+    }
+
+    enum Condition: String, CaseIterable {
+        case time = "Time", runtime = "Runtime", charge = "Charge"
+
+        static func value(_ c: Condition, of t: Trigger) -> Double? {
+            switch c {
+            case .time: return t.onBatteryFor
+            case .runtime: return t.runtimeAtMost.map(Double.init)
+            case .charge: return t.chargeAtMost.map(Double.init)
+            }
+        }
+        static func set(_ c: Condition, _ v: Double?, in t: inout Trigger) {
+            switch c {
+            case .time: t.onBatteryFor = v
+            case .runtime: t.runtimeAtMost = v.map { Int($0.rounded()) }
+            case .charge: t.chargeAtMost = v.map { Int($0.rounded()) }
+            }
+        }
     }
 
     enum VolumeMode: String {
@@ -54,47 +104,84 @@ final class Settings {
 
     // MARK: Policy
 
-    /// The three optional numbers are stored as a value plus an on/off flag, so turning a limit
-    /// off and on again brings the number back.
     var policy: Policy {
         get {
             let base = Policy()
-            return Policy(
-                graceSeconds: d.object(forKey: Key.grace) as? Double ?? base.graceSeconds,
-                hardAfterSeconds: d.object(forKey: Key.hardAfter) as? Double ?? base.hardAfterSeconds,
-                hardAtPercent: (d.object(forKey: Key.hardAtPercentOn) as? Bool ?? true) ? hardAtPercentValue : nil,
-                hardAtRuntimeSeconds: (d.object(forKey: Key.hardAtRuntimeOn) as? Bool ?? true) ? hardAtRuntimeValue : nil,
+            var p = Policy(
                 ignoreReadingsSeconds: d.object(forKey: Key.ignoreReadings) as? Double ?? base.ignoreReadingsSeconds,
                 lineStableSeconds: d.object(forKey: Key.lineStable) as? Double ?? base.lineStableSeconds,
                 quitApps: d.object(forKey: Key.quitApps) as? Bool ?? base.quitApps,
                 quitTimeoutSeconds: d.bool(forKey: Key.quitTimeoutOn) ? quitTimeoutValue : nil,
                 neverQuit: Set(d.stringArray(forKey: Key.neverQuit) ?? []),
-                afterSafe: Policy.AfterSafe(rawValue: d.string(forKey: Key.afterSafe) ?? "") ?? base.afterSafe
-            ).normalized
+                upsGoneSeconds: d.object(forKey: Key.upsGone) as? Double ?? base.upsGoneSeconds,
+                upsGoneInOutage: Policy.UPSGoneInOutage(rawValue: d.string(forKey: Key.upsGoneInOutage) ?? "") ?? base.upsGoneInOutage,
+                upsGoneInOutagePowersDown: d.object(forKey: Key.upsGoneInOutagePowersDown) as? Bool ?? base.upsGoneInOutagePowersDown,
+                upsGoneOnLine: Policy.UPSGoneOnLine(rawValue: d.string(forKey: Key.upsGoneOnLine) ?? "") ?? base.upsGoneOnLine)
+            p.powerDownWhenSafe = d.object(forKey: Key.powerDownWhenSafe) as? Bool ?? base.powerDownWhenSafe
+            p.powerDownAction = Policy.MacAction(rawValue: d.string(forKey: Key.powerDownAction) ?? "") ?? base.powerDownAction
+            for st in Stage.allCases {
+                var t = Trigger()
+                for c in Condition.allCases {
+                    let on = d.object(forKey: st.key(c) + "On") as? Bool ?? (Condition.value(c, of: st.trigger(of: base)) != nil)
+                    Condition.set(c, on ? value(st, c) : nil, in: &t)
+                }
+                st.set(t, in: &p)
+            }
+            return p.normalized
         }
         set {
             let p = newValue.normalized
-            d.set(p.graceSeconds, forKey: Key.grace)
-            d.set(p.hardAfterSeconds, forKey: Key.hardAfter)
-            d.set(p.hardAtPercent != nil, forKey: Key.hardAtPercentOn)
-            if let v = p.hardAtPercent { d.set(v, forKey: Key.hardAtPercent) }
-            d.set(p.hardAtRuntimeSeconds != nil, forKey: Key.hardAtRuntimeOn)
-            if let v = p.hardAtRuntimeSeconds { d.set(v, forKey: Key.hardAtRuntime) }
+            for st in Stage.allCases {
+                for c in Condition.allCases {
+                    let v = Condition.value(c, of: st.trigger(of: p))
+                    d.set(v != nil, forKey: st.key(c) + "On")
+                    if let v { d.set(v, forKey: st.key(c)) }
+                }
+            }
+            d.set(p.powerDownWhenSafe, forKey: Key.powerDownWhenSafe)
+            d.set(p.powerDownAction.rawValue, forKey: Key.powerDownAction)
             d.set(p.ignoreReadingsSeconds, forKey: Key.ignoreReadings)
             d.set(p.lineStableSeconds, forKey: Key.lineStable)
             d.set(p.quitApps, forKey: Key.quitApps)
             d.set(p.quitTimeoutSeconds != nil, forKey: Key.quitTimeoutOn)
             if let v = p.quitTimeoutSeconds { d.set(v, forKey: Key.quitTimeout) }
             d.set(Array(p.neverQuit.subtracting(Policy.alwaysKept)).sorted(), forKey: Key.neverQuit)
-            d.set(p.afterSafe.rawValue, forKey: Key.afterSafe)
+            d.set(p.upsGoneSeconds, forKey: Key.upsGone)
+            d.set(p.upsGoneInOutage.rawValue, forKey: Key.upsGoneInOutage)
+            d.set(p.upsGoneInOutagePowersDown, forKey: Key.upsGoneInOutagePowersDown)
+            d.set(p.upsGoneOnLine.rawValue, forKey: Key.upsGoneOnLine)
             changed()
         }
     }
 
-    /// The numbers behind the three switches, whether or not the switch is on (for the fields).
-    var hardAtPercentValue: Int { d.object(forKey: Key.hardAtPercent) as? Int ?? Policy().hardAtPercent ?? 50 }
-    var hardAtRuntimeValue: Int { d.object(forKey: Key.hardAtRuntime) as? Int ?? Policy().hardAtRuntimeSeconds ?? 600 }
+    /// The number behind a stage's condition, whether or not the condition is on (for the fields).
+    func value(_ st: Stage, _ c: Condition) -> Double { d.object(forKey: st.key(c)) as? Double ?? st.fallback(c) }
     var quitTimeoutValue: TimeInterval { d.object(forKey: Key.quitTimeout) as? Double ?? 60 }
+
+    /// Before 2026-10-11 the policy was a grace period, a hard limit (time, plus optional charge
+    /// and runtime) and an after-safe action. Copy those values into the stages once (while no
+    /// stage key exists yet), so an existing setup keeps its numbers. The old keys stay, so an
+    /// older build run afterwards still finds its own.
+    func migrateLegacyPolicy() {
+        let old = ["graceSeconds", "hardAfterSeconds", "hardAtPercent", "hardAtPercentEnabled",
+                   "hardAtRuntimeSeconds", "hardAtRuntimeEnabled", "afterSafe"]
+        guard old.contains(where: { d.object(forKey: $0) != nil }),
+              d.object(forKey: Stage.soft.key(.time) + "On") == nil else { return }
+        func move(_ from: String, to key: String) {
+            if let v = d.object(forKey: from) as? Double { d.set(v, forKey: key) }
+        }
+        move("graceSeconds", to: Stage.soft.key(.time))
+        move("hardAfterSeconds", to: Stage.hard.key(.time))
+        move("hardAtPercent", to: Stage.hard.key(.charge))
+        move("hardAtRuntimeSeconds", to: Stage.hard.key(.runtime))
+        if let on = d.object(forKey: "hardAtPercentEnabled") as? Bool { d.set(on, forKey: Stage.hard.key(.charge) + "On") }
+        if let on = d.object(forKey: "hardAtRuntimeEnabled") as? Bool { d.set(on, forKey: Stage.hard.key(.runtime) + "On") }
+        d.set(true, forKey: Stage.soft.key(.time) + "On")
+        if let raw = d.string(forKey: "afterSafe"), let a = Policy.MacAction(rawValue: raw) {
+            d.set(a.rawValue, forKey: Key.powerDownAction)
+            d.set(true, forKey: Key.powerDownWhenSafe)
+        }
+    }
 
     func resetPolicy() {
         for k in Key.policyKeys { d.removeObject(forKey: k) }

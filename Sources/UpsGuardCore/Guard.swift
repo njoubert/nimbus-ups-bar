@@ -6,16 +6,22 @@ import Foundation
 /// protected volumes and does it through the `GuardEnvironment`. It knows nothing about
 /// IOKit, Disk Arbitration or AppKit, which is what makes it testable with fakes.
 ///
-/// Phases, measured from the first reading on battery:
+/// Phases, measured from the first reading on battery. Each stage begins on its own
+/// `Trigger` in the policy (time on battery, runtime left, charge; whichever comes first):
 ///
 /// | Phase        | Meaning |
 /// |--------------|---------|
 /// | `line`       | Mains present (or no UPS at all). Nothing to do. |
-/// | `holding`    | On battery inside the grace period. Notified, Mac held awake, nothing touched. |
-/// | `soft`       | Grace over. Apps holding files are asked to quit; a volume unmounts as soon as no app holds it. |
-/// | `hard`       | A hard limit hit (time, charge, runtime, the UPS vanishing, or the owner). Every volume is force-unmounted regardless. |
-/// | `safe`       | Every protected volume is unmounted. Sleep hold released; the after-safe policy runs once. |
+/// | `holding`    | On battery before the soft trigger. Notified, Mac held awake, nothing touched. |
+/// | `soft`       | Soft trigger met. Apps holding files are asked to quit; a volume unmounts as soon as no app holds it. |
+/// | `hard`       | Hard trigger met (or the UPS vanished, the owner asked, or the power-down trigger needs the volumes off). Every volume is force-unmounted regardless. |
+/// | `safe`       | Every protected volume is unmounted. Sleep hold released; the power-down action runs once if due. |
 /// | `restoring`  | Mains back; volumes the guard unmounted are being remounted. |
+///
+/// The power-down trigger (sleep or shut down) is a stage of its own: when it fires the
+/// volumes are forced first and the action runs once they are safe, or `powerDownWait` later
+/// if one will not come off. A UPS that goes missing on line power, under the `unmount`
+/// policy, starts a *blind* outage: the volumes are forced and come back once the UPS does.
 ///
 /// Force is used for every unmount, because `smbd` dissents a plain unmount of any volume
 /// with a share point on it. Force only overrides dissenters and open files; the filesystem is
@@ -24,8 +30,8 @@ import Foundation
 ///
 /// Two debounces keep a flaky signal from undoing the work: line power has to stay back for
 /// `Policy.lineStableSeconds` before the outage is over (a brownout transfers every few
-/// seconds), and the UPS has to be missing for `absentDebounce` before "the UPS is gone" is a
-/// hard limit (a USB re-enumeration drops it for a moment). In both windows the limits are
+/// seconds), and the UPS has to be missing for `Policy.upsGoneSeconds` before it counts as gone
+/// (a USB re-enumeration drops it for a moment). In both windows the limits are
 /// judged against the last reading taken on battery.
 public final class OutageGuard {
 
@@ -67,9 +73,16 @@ public final class OutageGuard {
         public var outageStart: TimeInterval?
         /// Seconds on battery so far (0 outside an outage).
         public var elapsed: TimeInterval = 0
-        /// Countdown to the soft stage while holding, to the hard limit until safe.
+        /// Countdowns to the time conditions of the soft trigger (while holding) and the hard
+        /// trigger (until safe); nil when that trigger has no time condition.
         public var untilSoft: TimeInterval?
         public var untilHard: TimeInterval?
+        /// Countdown to the power-down trigger's time condition, while it has not run.
+        public var untilPowerDown: TimeInterval?
+        /// The power-down trigger has fired; the action runs once the volumes are safe.
+        public var powerDownPending = false
+        /// The UPS went missing on line power and the policy unmounted the volumes for it.
+        public var blind = false
         /// Countdown to the first volume being forced because its apps did not quit in time
         /// (soft stage, only with a quit timeout in the policy).
         public var untilQuitTimeout: TimeInterval?
@@ -77,7 +90,7 @@ public final class OutageGuard {
         public var untilForce: TimeInterval? { [untilHard, untilQuitTimeout].compactMap { $0 }.min() }
         /// Line power is back; the outage stands down when this reaches zero, unless it fails again.
         public var untilStandDown: TimeInterval?
-        /// The UPS has not been seen for this long during the outage (nil: it is there).
+        /// The UPS has not been seen for this long (nil: it is there, or was never seen).
         public var upsAbsentFor: TimeInterval?
         public var volumes: [VolumeReport] = []
         /// App names the soft phase is waiting for.
@@ -117,7 +130,12 @@ public final class OutageGuard {
     private var userHard = false
     private var postponed: TimeInterval = 0
     private var noQuitThisOutage = false
-    private var afterSafeDone = false
+    private var powerDone = false
+    private var powerSince: TimeInterval?
+    private var hardSince: TimeInterval?
+    private var blind = false
+    private var everSeen = false
+    private var goneOnLineHandled = false
     private var awakeHeld = false
     private var lastProgressLog: TimeInterval = 0
     private var lastWaiting: [String] = []
@@ -129,8 +147,10 @@ public final class OutageGuard {
     /// long a volume reported mounted right after a successful unmount is trusted to be on its
     /// way out (Disk Arbitration's description change can trail the completion).
     public static let unmountRetry: TimeInterval = 10
-    /// How long the UPS has to be missing mid-outage before that counts as the battery dying.
-    public static let absentDebounce: TimeInterval = 10
+    /// How long after the power-down trigger fires the action runs anyway when a volume will
+    /// not unmount: the Mac shutting down unmounts what it can itself; waiting on would only
+    /// spend the battery.
+    public static let powerDownWait: TimeInterval = 60
     /// Re-entrancy: an unmount or mount completion that lands while a tick is running (the
     /// fakes, and Disk Arbitration on a fast path) asks for one more evaluation at the end of
     /// the tick rather than nesting one inside it. Four rounds is the ceiling; the timer
@@ -169,9 +189,15 @@ public final class OutageGuard {
         // What kind of reading is this, in the light of the outage so far?
         let onBattery = reading.present && reading.onBattery
         let onLine = reading.present && !reading.onBattery
-        if reading.present { absentSince = nil } else if outageStart != nil, absentSince == nil { absentSince = now }
+        if reading.present {
+            if absentSince != nil, outageStart == nil, goneOnLineHandled { env.log("the UPS is back") }
+            absentSince = nil
+            everSeen = true
+            goneOnLineHandled = false
+        } else if everSeen, absentSince == nil { absentSince = now }
         if onBattery {
             lastBatteryReading = reading
+            blind = false
             if let since = lineSince { env.log("line power failed again after \(Duration.text(now - since))") }
             lineSince = nil
         }
@@ -179,8 +205,22 @@ public final class OutageGuard {
         // switched off (the USB connection goes with it): the hardest of hard limits, once it
         // has been gone long enough not to be a USB re-enumeration.
         let absentFor = absentSince.map { now - $0 }
-        let upsGone = outageStart != nil && !reading.present && (absentFor ?? 0) >= Self.absentDebounce
-        let absentBlip = outageStart != nil && !reading.present && !upsGone
+        let gone = !reading.present && (absentFor ?? 0) >= policy.upsGoneSeconds
+        // Missing on line power: say so once, and under the `unmount` policy start a blind
+        // outage, so the volumes come off now rather than in an outage nobody will see.
+        if gone, outageStart == nil, !goneOnLineHandled, policy.upsGoneOnLine != .nothing {
+            goneOnLineHandled = true
+            let what = "No word from the UPS for \(Duration.text(absentFor ?? 0)): a power cut now would go unnoticed. Check its USB cable."
+            env.log("the UPS has not been seen for \(Duration.text(absentFor ?? 0)) on line power")
+            if policy.upsGoneOnLine == .unmount {
+                blind = true
+                beginOutage(now: now, reading: reading, mounted: mounted)
+            } else {
+                env.notify(title: "UPS not seen", body: what)
+            }
+        }
+        let upsGone = outageStart != nil && gone
+        let absentBlip = outageStart != nil && !reading.present && !gone
         // Line power back: the outage stands down only once it has stayed back long enough.
         var standingDown = false
         if outageStart != nil, onLine {
@@ -201,42 +241,64 @@ public final class OutageGuard {
                 lastProgressLog = now
                 env.log("on battery \(Duration.text(elapsed)): \(describe(reading)); mounted: \(mounted.isEmpty ? "none" : mounted.map(\.name).joined(separator: ", "))")
             }
+            let usable = elapsed >= policy.ignoreReadingsSeconds
+            var reasons = policy.hardAt.reasons(elapsed: elapsed, postponed: postponed, reading: judged, usable: usable)
+            if upsGone {
+                if blind { reasons.insert("the UPS has not been seen for \(Duration.text(absentFor ?? 0)) on line power", at: 0) }
+                else if policy.upsGoneInOutage == .forceUnmount { reasons.insert("the UPS has gone away (battery exhausted?)", at: 0) }
+            }
+            if userHard { reasons.append("unmount requested from the menu") }
+            if usable, judged.flags.contains(.shutdownImminent) { reasons.append("the UPS says shutdown is imminent") }
+            let softReasons = policy.softAt.reasons(elapsed: elapsed, postponed: postponed, reading: judged, usable: usable)
+            // An unmount stage is (or was) due: the condition for "power down once safe".
+            let unmountDue = softSince != nil || hardSince != nil || !softReasons.isEmpty || !reasons.isEmpty
+            if !blind, !standingDown, !powerDone, powerSince == nil {
+                var down = policy.powerDownAt.reasons(elapsed: elapsed, postponed: postponed, reading: judged, usable: usable)
+                if upsGone, policy.upsGoneInOutagePowersDown { down.append("the UPS has gone away") }
+                if !down.isEmpty {
+                    powerSince = now
+                    env.log("power-down trigger (\(down.joined(separator: "; "))): \(policy.powerDownAction.verb) once the volumes are off")
+                    if !mounted.isEmpty {
+                        env.notify(title: "About to \(policy.powerDownAction.verb)", body: "\(down.first ?? "Power-down trigger"). Unmounting \(mounted.map(\.name).joined(separator: ", ")) first.")
+                    }
+                }
+            }
+            if powerSince != nil { reasons.append("about to \(policy.powerDownAction.verb)") }
+
             if mounted.isEmpty && inFlight.isEmpty {
                 if phase != .safe {
                     env.log(unmountedByGuard.isEmpty ? "nothing mounted to protect" : "every protected volume is unmounted")
                     phase = .safe
                 }
                 hold(false)
-                if !standingDown { maybeAfterSafe(elapsed: elapsed) }
+                if !standingDown, powerSince != nil || (policy.powerDownWhenSafe && !blind && unmountDue) {
+                    powerDown(because: powerSince != nil ? "the volumes are safe" : "the volumes are safe (power down once safe)")
+                }
             } else {
                 // Every tick, not just at the transfer: a volume mounted mid-outage, or one
                 // that Disk Arbitration reports only after a relaunch, needs the hold too.
                 hold(true)
-                let usable = elapsed >= policy.ignoreReadingsSeconds
-                var reasons: [String] = []
-                if upsGone { reasons.append("the UPS has gone away (battery exhausted?)") }
-                if userHard { reasons.append("unmount requested from the menu") }
-                if elapsed >= policy.hardAfterSeconds + postponed { reasons.append("\(Duration.text(elapsed)) on battery") }
-                if usable, let limit = policy.hardAtPercent, let pct = judged.chargePercent, pct <= limit { reasons.append("charge at \(pct) %") }
-                if usable, let limit = policy.hardAtRuntimeSeconds, let rt = judged.runtimeSeconds, rt <= limit { reasons.append("runtime down to \(Duration.text(TimeInterval(rt)))") }
-                if usable, judged.flags.contains(.shutdownImminent) { reasons.append("the UPS says shutdown is imminent") }
+                if let since = powerSince, now - since >= Self.powerDownWait, !standingDown {
+                    powerDown(because: "\(mounted.map(\.name).joined(separator: ", ")) still mounted \(Duration.text(now - since)) after the trigger")
+                }
                 hardReasons = reasons
                 if !reasons.isEmpty {
                     if phase != .hard {
                         phase = .hard
+                        hardSince = hardSince ?? now
                         refreshHolders(mounted, now: now)
                         env.log("hard limit (\(reasons.joined(separator: "; "))): unmounting \(mounted.map(\.name).joined(separator: ", ")) regardless of apps")
                         env.notify(title: "Unmounting now", body: "\(reasons.first ?? "Hard limit"). \(mounted.map(\.name).joined(separator: ", ")) unmounting regardless of open apps.")
                     }
                     for v in mounted where canUnmount(v, now: now) { unmount(v) }
-                } else if softSince != nil || elapsed >= policy.graceSeconds + postponed {
+                } else if softSince != nil || !softReasons.isEmpty {
                     // Once the soft stage has begun it stays begun: a postponement moves the
                     // hard limit out, it does not un-ask the apps.
                     let quitting = policy.quitApps && !noQuitThisOutage
                     if phase != .soft {
                         phase = .soft
                         softSince = now
-                        env.log("grace period over (\(Duration.text(elapsed)) on battery): \(quitting ? "asking apps to quit, then unmounting" : "unmounting volumes no app is using (apps are not asked to quit)")")
+                        env.log("soft stage (\(softReasons.joined(separator: "; "))): \(quitting ? "asking apps to quit, then unmounting" : "unmounting volumes no app is using (apps are not asked to quit)")")
                     }
                     refreshHolders(mounted, now: now)
                     var waiting: [String] = []
@@ -311,8 +373,8 @@ public final class OutageGuard {
         tick(lastReading)
     }
 
-    /// Push the soft stage and the time-based hard limit out by `seconds`. The charge and
-    /// runtime limits still apply: postponing cannot talk the battery into lasting longer.
+    /// Push the time conditions of every trigger out by `seconds`. The charge and runtime
+    /// conditions still apply: postponing cannot talk the battery into lasting longer.
     public func postpone(seconds: TimeInterval) {
         guard outageStart != nil else { return }
         postponed += seconds
@@ -354,19 +416,27 @@ public final class OutageGuard {
         userHard = false
         postponed = 0
         noQuitThisOutage = false
-        afterSafeDone = false
+        powerDone = false
+        powerSince = nil
+        hardSince = nil
         softSince = nil
         lineSince = nil
-        absentSince = nil
+        if reading.present { absentSince = nil }
         lastUnmountFailure = [:]
         lastUnmountSuccess = [:]
         lastWaiting = []
         lastProgressLog = now
-        if reading.present { lastBatteryReading = reading }
+        lastBatteryReading = reading.present ? reading : .absent()
         phase = .holding
+        let names = mounted.map(\.name).joined(separator: ", ")
+        let when = policy.softAt.onBatteryFor.map { " in \(Duration.text(max(0, $0 - (resumed ?? 0))))" } ?? (policy.softAt.isNever ? "" : " when \(policy.softAt.summary) is reached")
         let what = mounted.isEmpty ? "No protected volume is mounted."
-            : "\(mounted.map(\.name).joined(separator: ", ")) unmount\(mounted.count == 1 ? "s" : "") in \(Duration.text(max(0, policy.graceSeconds - (resumed ?? 0)))) unless power returns."
-        if let resumed {
+            : "\(names) unmount\(mounted.count == 1 ? "s" : "")\(when) unless power returns."
+        if blind {
+            env.log("blind outage: the UPS is missing on line power; mounted: \(mounted.isEmpty ? "none" : names)")
+            env.notify(title: "UPS not seen", body: "No word from the UPS for \(Duration.text(policy.upsGoneSeconds)). "
+                       + (mounted.isEmpty ? "Nothing is mounted to protect." : "Unmounting \(names); they remount when it is back."))
+        } else if let resumed {
             env.log("resuming an outage that began \(Duration.text(resumed)) ago (relaunched mid-outage): \(describe(reading)); mounted: \(mounted.isEmpty ? "none" : mounted.map(\.name).joined(separator: ", "))")
             env.notify(title: "Power outage (resumed)", body: "On battery for \(Duration.text(resumed)) already. \(describeShort(reading)). \(what)")
         } else {
@@ -378,14 +448,17 @@ public final class OutageGuard {
     private func endOutage(now: TimeInterval, reading: UPSReading) {
         let elapsed = now - (outageStart ?? now)
         lastOutageSeconds = elapsed
-        env.log("outage over after \(Duration.text(elapsed)): \(reading.present ? "line power is back" : "no UPS seen")")
-        env.notify(title: "Power restored", body: "After \(Duration.text(elapsed)). \(describeShort(reading))."
+        env.log("outage over after \(Duration.text(elapsed)): \(blind ? "the UPS is back" : reading.present ? "line power is back" : "no UPS seen")")
+        env.notify(title: blind ? "UPS back" : "Power restored", body: "After \(Duration.text(elapsed)). \(describeShort(reading))."
                    + (unmountedByGuard.isEmpty ? "" : " Remounting \(unmountedByGuard.values.map(\.name).sorted().joined(separator: ", "))."))
         hold(false)
         outageStart = nil
         softSince = nil
         lineSince = nil
         absentSince = nil
+        blind = false
+        powerSince = nil
+        hardSince = nil
         asked = [:]
         lastWaiting = []
         lastMountAttempt = [:]
@@ -393,14 +466,11 @@ public final class OutageGuard {
         lastUnmountSuccess = [:]
     }
 
-    private func maybeAfterSafe(elapsed: TimeInterval) {
-        guard !afterSafeDone, policy.afterSafe != .keepRunning else { return }
-        // A blip short enough that nothing was going to be unmounted must not sleep the Mac
-        // either: the after-safe action waits out the grace period like everything else.
-        guard elapsed >= policy.graceSeconds + postponed else { return }
-        afterSafeDone = true
-        env.log("volumes are safe: \(policy.afterSafe.title.lowercased())")
-        env.perform(policy.afterSafe)
+    private func powerDown(because why: String) {
+        guard !powerDone else { return }
+        powerDone = true
+        env.log("\(why): \(policy.powerDownAction.title.lowercased())")
+        env.perform(policy.powerDownAction)
     }
 
     private func hold(_ on: Bool) {
@@ -502,10 +572,11 @@ public final class OutageGuard {
         s.elapsed = outageStart.map { now - $0 } ?? 0
         if let start = outageStart {
             let elapsed = now - start
-            if phase == .holding { s.untilSoft = max(0, policy.graceSeconds + postponed - elapsed) }
-            if phase != .safe { s.untilHard = max(0, policy.hardAfterSeconds + postponed - elapsed) }
+            if phase == .holding { s.untilSoft = policy.softAt.untilTime(elapsed: elapsed, postponed: postponed) }
+            if phase != .safe { s.untilHard = policy.hardAt.untilTime(elapsed: elapsed, postponed: postponed) }
+            if !powerDone, powerSince == nil, !blind { s.untilPowerDown = policy.powerDownAt.untilTime(elapsed: elapsed, postponed: postponed) }
+            s.powerDownPending = powerSince != nil && !powerDone
             if standingDown, let since = lineSince { s.untilStandDown = max(0, policy.lineStableSeconds - (now - since)) }
-            s.upsAbsentFor = absentFor
             if phase == .soft, policy.quitApps, !noQuitThisOutage, let timeout = policy.quitTimeoutSeconds {
                 let deadlines = volumes.filter(\.isMounted).map { appHolders($0) }.filter { !$0.isEmpty }.map { quitDeadline(for: $0, timeout: timeout) }
                 if let next = deadlines.min(), next.isFinite { s.untilQuitTimeout = max(0, next - now) }
@@ -520,6 +591,8 @@ public final class OutageGuard {
                          lastError: volumeErrors[v.uuid],
                          holdersAt: holders[v.uuid]?.at)
         }
+        s.upsAbsentFor = absentFor
+        s.blind = blind
         s.waitingFor = lastWaiting
         s.postponedBy = postponed
         s.quitAppsThisOutage = policy.quitApps && !noQuitThisOutage

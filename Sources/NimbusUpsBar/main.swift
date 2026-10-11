@@ -26,7 +26,8 @@ import UpsGuardCore
 //   --print                 everything the menu would show, as text; exit
 //   --print-menu            the menu itself, built against the real UPS and volumes, as an indented tree; exit
 //   --watch                 print readings and the guard's log as they happen (Ctrl-C to stop)
-//   --simulate              run a rehearsal (pretend outage, nothing touched) in the terminal; exit when done
+//   --simulate [SCENARIO]   run a rehearsal (pretend outage, nothing touched) in the terminal; exit when done.
+//                           SCENARIO: drain (default), shortBattery, upsLostInOutage, upsLostOnLine
 //   --holders PATH          who has files open on a mount point; exit
 //   --volumes               the external volumes as the guard sees them; exit
 //   --check-update          what the updater sees on GitHub; exit
@@ -38,7 +39,7 @@ func usage() -> Never {
                         [--render-icon PATH [--size PX]] [--render-iconset DIR]
                         [--render-dmg-background DIR [--signed]] [--dump-bar PATH] [--dump-chart PATH]
                         [--dump-settings DIR] [--dump-hid-raw PATH] [--after-safe sleep|shutdown]
-                        [--print | --print-menu | --watch | --simulate | --holders PATH | --volumes]
+                        [--print | --print-menu | --watch | --simulate [SCENARIO] | --holders PATH | --volumes]
                         [--check-update | --preflight APP.app]
     """)
     exit(2)
@@ -107,7 +108,7 @@ while !args.isEmpty {
                 v.appearance = NSAppearance(named: appearance)
                 v.samples = { data }
                 v.now = { now }
-                v.chargeLimit = Policy().hardAtPercent
+                v.chargeLimit = Policy().hardAt.chargeAtMost
                 v.simulateHover(atFraction: hover)
                 v.debugBackground = true
                 guard let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { exit(1) }
@@ -124,7 +125,18 @@ while !args.isEmpty {
     case "--print": cli = .print
     case "--print-menu": cli = .printMenu
     case "--watch": cli = .watch
-    case "--simulate": cli = .simulate
+    case "--simulate":
+        // An optional scenario name may follow: drain (the default), shortBattery,
+        // upsLostInOutage, upsLostOnLine.
+        var scenario = SimulatedOutage.Scenario.drain
+        if let next = args.first, !next.hasPrefix("-") {
+            args.removeFirst()
+            guard let s = SimulatedOutage.Scenario(rawValue: next) else {
+                fputs("--simulate takes \(SimulatedOutage.Scenario.allCases.map(\.rawValue).joined(separator: ", "))\n", stderr); usage()
+            }
+            scenario = s
+        }
+        cli = .simulate(scenario: scenario)
     case "--holders": cli = .holders(path: takeValue(a))
     case "--volumes": cli = .volumes
     case "--check-update": cli = .checkUpdate

@@ -28,7 +28,7 @@ public protocol GuardEnvironment: AnyObject {
     func setAwakeHold(_ on: Bool)
     func notify(title: String, body: String)
     /// Sleep or shut down the Mac, per policy, once the volumes are safe.
-    func perform(_ action: Policy.AfterSafe)
+    func perform(_ action: Policy.MacAction)
     func log(_ line: String)
 }
 
@@ -90,8 +90,8 @@ public final class RehearsalEnvironment: GuardEnvironment {
 
     public func notify(title: String, body: String) { base.notify(title: "Rehearsal: \(title)", body: body) }
 
-    public func perform(_ action: Policy.AfterSafe) {
-        if action != .keepRunning { record("would \(action.title.lowercased())") }
+    public func perform(_ action: Policy.MacAction) {
+        record("would \(action.title.lowercased())")
     }
 
     public func log(_ line: String) { base.log("[rehearsal] " + line) }
@@ -127,8 +127,8 @@ public final class DrillEnvironment: GuardEnvironment {
     }
     public func setAwakeHold(_ on: Bool) { base.setAwakeHold(on) }
     public func notify(title: String, body: String) { base.notify(title: "Drill: \(title)", body: body) }
-    public func perform(_ action: Policy.AfterSafe) {
-        if action != .keepRunning { base.log("[drill] not performing \"\(action.title)\" during a drill") }
+    public func perform(_ action: Policy.MacAction) {
+        base.log("[drill] not performing \"\(action.title)\" during a drill")
     }
     public func log(_ line: String) { base.log("[drill] " + line) }
 }
