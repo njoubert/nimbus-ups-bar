@@ -5,10 +5,11 @@
 <h1 align="center">Nimbus UPS Bar</h1>
 
 <p align="center">
-  A macOS menu bar guard for a desk on a UPS: when the mains fail it watches the UPS, gives the
-  apps a chance to close, and cleanly unmounts the external drives before the battery runs out.
-  Everything the UPS reports, a chart of load and charge, and a health check, in the dropdown.<br>
-  No Dock icon, no window. Swift, SwiftPM, AppKit. One dependency: our own
+  A macOS menu bar guard for using a UPS with externally-powered drives when your host computer
+  is a laptop: when the mains fail it watches the UPS, gives the apps a chance to close, and
+  cleanly unmounts the external drives before the battery runs out. Everything the UPS reports,
+  a chart of load and charge, and a health check, in the dropdown.<br>
+  No Dock icon; a menu and a Settings window. Swift, SwiftPM, AppKit. One dependency: our own
   <a href="https://github.com/njoubert/nimbus-updater">nimbus-updater</a>, which keeps it up to date.
 </p>
 
