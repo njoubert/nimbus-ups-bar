@@ -76,7 +76,10 @@ enum CLI {
             m.poll(reason: nil)
             spin(1.0)
             m.poll(reason: nil)
-            let bar = StatusBarController(monitor: m, updater: nil)
+            // No window server (a CI runner, an SSH session): build the menu without a status
+            // item rather than abort in NSStatusBar. NIMBUS_UPS_HEADLESS=1 forces that path.
+            let headless = CGSessionCopyCurrentDictionary() == nil || ProcessInfo.processInfo.environment["NIMBUS_UPS_HEADLESS"] != nil
+            let bar = StatusBarController(monitor: m, updater: nil, headless: headless)
             Swift.print(bar.menuText())
             return 0
 

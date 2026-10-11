@@ -12,7 +12,9 @@ import UpsGuardCore
 @MainActor
 final class StatusBarController: NSObject, NSMenuDelegate {
 
-    private let item: NSStatusItem
+    /// nil when headless: `--print-menu` on a machine with no window server (CI) builds the
+    /// menu without a status item, since `NSStatusBar` aborts without a WindowServer session.
+    private let item: NSStatusItem?
     private let menu = NSMenu()
     private let monitor: UPSMonitor
     private let updater: Updater?
@@ -28,14 +30,14 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private var versionItem: NSMenuItem?
     private var lastBar: (symbol: String, title: String, color: String)?
 
-    init(monitor: UPSMonitor, updater: Updater? = nil) {
+    init(monitor: UPSMonitor, updater: Updater? = nil, headless: Bool = false) {
         self.monitor = monitor
         self.updater = updater
-        item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item = headless ? nil : NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
         menu.delegate = self
         menu.autoenablesItems = false
-        item.menu = menu
+        item?.menu = menu
         headline.model = { [weak self] in self?.headlineModel() ?? HeadlineView.Model(title: "", color: .clear, subtitle: "") }
         headline.toolTip = "Charge, load and voltages come from a USB read of the UPS: every 10 s on line power, every 2 s on battery and while this menu is open. "
             + "The line/battery state also arrives from macOS the moment it changes. The top-right figure is the age of what you see."
@@ -77,7 +79,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     /// Render the status button (layout check without a screen grab).
     func dumpBar(to path: String) -> Bool {
-        guard let b = item.button, let rep = b.bitmapImageRepForCachingDisplay(in: b.bounds) else { return false }
+        guard let b = item?.button, let rep = b.bitmapImageRepForCachingDisplay(in: b.bounds) else { return false }
         b.cacheDisplay(in: b.bounds, to: rep)
         guard let data = rep.representation(using: .png, properties: [:]) else { return false }
         return (try? data.write(to: URL(fileURLWithPath: path))) != nil
@@ -127,7 +129,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         let key = (symbol, title, color?.description ?? "")
         if let l = lastBar, l == key { return }
         lastBar = key
-        guard let button = item.button else { return }
+        guard let button = item?.button else { return }
         var image = NSImage(systemSymbolName: symbol, accessibilityDescription: "UPS")?
             .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
         if let color, let img = image {
