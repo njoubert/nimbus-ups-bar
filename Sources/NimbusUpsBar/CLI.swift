@@ -86,6 +86,10 @@ enum CLI {
             let headless = !attrs.contains(.sessionHasGraphicAccess) || env["NIMBUS_UPS_HEADLESS"] != nil
             let trace = env["NIMBUS_UPS_TRACE"] != nil
             if trace { fputs("trace: session attrs 0x\(String(attrs.rawValue, radix: 16)), graphic access \(attrs.contains(.sessionHasGraphicAccess)), headless \(headless)\n", stderr) }
+            // In a graphics session AppKit still needs the application object before anything
+            // touches the window server: on macOS 15 NSStatusBar aborts in CGSConnectionByID
+            // without it (newer releases connect lazily, which is why the desk never saw it).
+            if !headless { _ = NSApplication.shared }
             let bar = StatusBarController(monitor: m, updater: nil, headless: headless)
             if trace { fputs("trace: controller built\n", stderr) }
             let text = bar.menuText()
