@@ -128,23 +128,39 @@ public final class OutageGuard {
     public var resumeElapsed: TimeInterval?
 
     /// What a copy started after this one needs to carry on: the volumes this guard unmounted
-    /// and has not remounted yet (whether or not an outage is still on), and the apps asked to
-    /// quit in the outage under way, with when. Empty when there is nothing unfinished.
+    /// and has not remounted yet (whether or not an outage is still on), and, for the outage
+    /// under way, the apps asked to quit (with when) and what the owner did and the guard
+    /// already did (postponed, apps not to be quit, Unmount Now, slept or shut down). Empty
+    /// when there is nothing unfinished.
     public var carryover: Carryover {
         var c = Carryover()
         for (uuid, v) in unmountedByGuard { c.unmounted[uuid] = v.name }
-        if let start = outageStart { for (key, at) in asked { c.askedAt[key] = at - start } }
-        else { c.askedAt = resumeAsked }   // resumed but not ticked yet: still the previous copy's
+        if let start = outageStart {
+            for (key, at) in asked { c.askedAt[key] = at - start }
+            c.postponed = postponed
+            c.noQuit = noQuitThisOutage
+            c.unmountRequested = userHard
+            c.poweredDown = powerDone
+        } else if let r = resumeOutage {
+            // Resumed but not ticked yet: still the previous copy's.
+            c.askedAt = r.askedAt
+            c.postponed = r.postponed
+            c.noQuit = r.noQuit
+            c.unmountRequested = r.unmountRequested
+            c.poweredDown = r.poweredDown
+        }
         return c
     }
 
     /// Before the first tick of a relaunched copy: the outage began `elapsed` ago (nil: not
     /// known to be in one), and `carryover` is what the previous copy left unfinished. The
-    /// volumes are remounted when the power is back, as if this copy had unmounted them; the
-    /// asks count only if the outage is resumed (a first reading on line power drops them).
+    /// volumes are remounted once the power is back and trusted, as if this copy had unmounted
+    /// them. The rest belongs to the outage: kept if it is resumed, dropped otherwise. A first
+    /// reading on line power resumes it too, into a fresh stand-down: the previous copy may
+    /// have stopped mid-stand-down, and a brownout must not get a remount for free.
     public func resume(elapsed: TimeInterval?, carryover: Carryover) {
         resumeElapsed = elapsed
-        resumeAsked = carryover.askedAt
+        resumeOutage = carryover
         for (uuid, name) in carryover.unmounted where unmountedByGuard[uuid] == nil {
             unmountedByGuard[uuid] = VolumeState(uuid: uuid, name: name, isAttached: false)
         }
@@ -156,7 +172,7 @@ public final class OutageGuard {
     /// When `lastBatteryReading` was taken: a reading is usable only if it was taken after
     /// `ignoreReadingsSeconds`, however long the outage then goes on.
     private var lastBatteryAt: TimeInterval = 0
-    private var resumeAsked: [String: TimeInterval] = [:]
+    private var resumeOutage: Carryover?
     private var outageStart: TimeInterval?
     private var phase: Phase = .line
     private var softSince: TimeInterval?
@@ -269,6 +285,9 @@ public final class OutageGuard {
                 env.notify(title: "UPS not seen", body: what)
             }
         }
+        // Relaunched while the previous copy was in an outage, and the power is back: resume
+        // the outage so it stands down (and remounts) only once the power has stayed back.
+        if outageStart == nil, resumeElapsed != nil, onLine { beginOutage(now: now, reading: reading, mounted: mounted) }
         let upsGone = outageStart != nil && gone
         let absentBlip = outageStart != nil && !reading.present && !gone
         // Line power back: the outage stands down only once it has stayed back long enough.
@@ -430,10 +449,13 @@ public final class OutageGuard {
         } else {
             if outageStart != nil { endOutage(now: now, reading: reading) }
             resumeElapsed = nil
-            resumeAsked = [:]
+            resumeOutage = nil
             hardReasons = []
             // Remount whatever we unmounted, now that mains is back and the disks are still here.
-            for v in volumes where unmountedByGuard[v.uuid] != nil {
+            // Only with a UPS on line power in view: with none (a blind outage carried across a
+            // relaunch, before this copy has seen the UPS) nothing would watch the volumes.
+            let mainsSeen = reading.present && !reading.onBattery
+            for v in volumes where unmountedByGuard[v.uuid] != nil && (mainsSeen || v.isMounted) {
                 if v.isMounted {
                     unmountedByGuard.removeValue(forKey: v.uuid)
                     volumeErrors.removeValue(forKey: v.uuid)
@@ -500,13 +522,19 @@ public final class OutageGuard {
         resumeElapsed = nil
         outageStart = now - (resumed ?? 0)
         asked = [:]
-        // A resumed outage keeps the previous copy's asks, at the times they were made.
-        if resumed != nil, let start = outageStart { for (key, s) in resumeAsked { asked[key] = start + s } }
-        resumeAsked = [:]
         userHard = false
         postponed = 0
         noQuitThisOutage = false
         powerDone = false
+        // A resumed outage keeps what the previous copy and the owner did in it.
+        if resumed != nil, let start = outageStart, let r = resumeOutage {
+            for (key, s) in r.askedAt { asked[key] = start + s }
+            postponed = r.postponed
+            noQuitThisOutage = r.noQuit
+            userHard = r.unmountRequested
+            powerDone = r.poweredDown
+        }
+        resumeOutage = nil
         powerSince = nil
         hardSince = nil
         hardBecause = []
@@ -518,7 +546,8 @@ public final class OutageGuard {
         lastUnmountSuccess = [:]
         lastWaiting = []
         lastProgressLog = now
-        lastBatteryReading = reading.present ? reading : .absent()
+        // Only a reading on battery is a battery reading (a resume can begin on line power).
+        lastBatteryReading = reading.present && reading.onBattery ? reading : .absent()
         lastBatteryAt = now
         phase = .holding
         let names = mounted.map(\.name).joined(separator: ", ")
@@ -529,6 +558,9 @@ public final class OutageGuard {
             env.log("blind outage: the UPS is missing on line power; mounted: \(mounted.isEmpty ? "none" : names)")
             env.notify(title: "UPS not seen", body: "No word from the UPS for \(Duration.text(policy.upsGoneSeconds)). "
                        + (mounted.isEmpty ? "Nothing is mounted to protect." : "Unmounting \(names); they remount when it is back."))
+        } else if let resumed, !(reading.present && reading.onBattery) {
+            // Relaunched after the power came back: the outage stands down from here.
+            env.log("resuming an outage that began \(Duration.text(resumed)) ago (relaunched mid-outage); the power is back, so it stands down unless the power fails again")
         } else if let resumed {
             env.log("resuming an outage that began \(Duration.text(resumed)) ago (relaunched mid-outage): \(describe(reading)); mounted: \(mounted.isEmpty ? "none" : mounted.map(\.name).joined(separator: ", "))")
             env.notify(title: "Power outage (resumed)", body: "On battery for \(Duration.text(resumed)) already. \(describeShort(reading)). \(what)")
@@ -729,15 +761,37 @@ public final class OutageGuard {
 public struct Carryover: Equatable, Sendable, Codable {
     /// Volumes the guard unmounted and has not remounted: UUID → name.
     public var unmounted: [String: String]
-    /// Apps asked to quit in the outage under way: their `appKey` → seconds into the outage.
+    /// The outage under way: apps asked to quit, their `appKey` → seconds into the outage.
     public var askedAt: [String: TimeInterval]
+    /// …the owner's Postpone, in total; "Don't Quit Apps This Outage"; "Unmount Now".
+    public var postponed: TimeInterval
+    public var noQuit: Bool
+    public var unmountRequested: Bool
+    /// …and the Mac was already put to sleep or shut down (once per outage).
+    public var poweredDown: Bool
 
-    public init(unmounted: [String: String] = [:], askedAt: [String: TimeInterval] = [:]) {
+    public init(unmounted: [String: String] = [:], askedAt: [String: TimeInterval] = [:], postponed: TimeInterval = 0,
+                noQuit: Bool = false, unmountRequested: Bool = false, poweredDown: Bool = false) {
         self.unmounted = unmounted
         self.askedAt = askedAt
+        self.postponed = postponed
+        self.noQuit = noQuit
+        self.unmountRequested = unmountRequested
+        self.poweredDown = poweredDown
     }
 
-    public var isEmpty: Bool { unmounted.isEmpty && askedAt.isEmpty }
+    public var isEmpty: Bool { self == Carryover() }
+
+    /// Every field optional on the way in, so a carryover saved by an older build still loads.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(unmounted: try c.decodeIfPresent([String: String].self, forKey: .unmounted) ?? [:],
+                  askedAt: try c.decodeIfPresent([String: TimeInterval].self, forKey: .askedAt) ?? [:],
+                  postponed: try c.decodeIfPresent(TimeInterval.self, forKey: .postponed) ?? 0,
+                  noQuit: try c.decodeIfPresent(Bool.self, forKey: .noQuit) ?? false,
+                  unmountRequested: try c.decodeIfPresent(Bool.self, forKey: .unmountRequested) ?? false,
+                  poweredDown: try c.decodeIfPresent(Bool.self, forKey: .poweredDown) ?? false)
+    }
 }
 
 /// "45 s", "2 min 05 s", "1 h 30 min": the one way durations are written everywhere.

@@ -549,13 +549,18 @@ final class GuardTests: XCTestCase {
         XCTAssertEqual(guardian.status.untilHard!, 98, accuracy: 0.01)
     }
 
-    func testResumeIsDroppedByALineReading() {
+    func testResumeOnLinePowerStandsDownThenALaterOutageStartsFromZero() {
         env.add(flitslig)
         guardian.resumeElapsed = 200
         guardian.tick(ac())                           // launched after the power came back
         XCTAssertNil(guardian.resumeElapsed)
+        XCTAssertEqual(guardian.status.untilStandDown!, 30, accuracy: 0.01, "the previous copy may have been mid-stand-down")
+        run(ac(), for: 30)
+        XCTAssertEqual(guardian.status.phase, .line)
+        XCTAssertTrue(env.unmounts.isEmpty)
         onBattery(until: 60)
         XCTAssertEqual(guardian.status.phase, .holding, "a later outage starts from zero")
+        XCTAssertEqual(guardian.status.elapsed, 60, accuracy: 0.01)
     }
 
     func testPowerReturnsRemountInFlightThenFailsAgain() {
@@ -1200,14 +1205,117 @@ final class GuardTests: XCTestCase {
         let c = Carryover(unmounted: ["B2D1": "Flitslig"], askedAt: ["com.adobe.LightroomClassic": 121.5])
         let data = try! JSONEncoder().encode(c)
         XCTAssertEqual(try! JSONDecoder().decode(Carryover.self, from: data), c, "it survives the trip through UserDefaults")
-        // A carried ask belongs to the outage it was made in: a launch on line power drops it.
+        // A carried ask belongs to the outage it was made in: once that outage stands down on
+        // line power, it is gone.
         let next = OutageGuard(environment: env, policy: Policy())
         next.resume(elapsed: 200, carryover: Carryover(askedAt: ["com.adobe.LightroomClassic": 121.5]))
         next.tick(ac())
+        XCTAssertFalse(next.carryover.isEmpty, "still standing down")
+        var t: TimeInterval = 0
+        while t < 30 { env.now += 5; t += 5; next.tick(ac()) }
         XCTAssertTrue(next.carryover.isEmpty)
         env.holderLists["B2D1"] = [lightroom]
         onBatteryWith(next, until: 125)
         XCTAssertEqual(env.quits, [lightroom.appKey], "a new outage asks again")
+    }
+
+    func testRelaunchDuringTheStandDownStandsDownAgainBeforeRemounting() {
+        // M1, found in review: the previous copy unmounted Flitslig and the power came back;
+        // it relaunched 15 s into the stand-down. Remounting on the first look skipped the
+        // stand-down that exists for brownouts.
+        env.add(flitslig)
+        guardian.tick(ac())
+        onBattery(until: 125)
+        run(ac(), for: 15)
+        let carried = guardian.carryover
+        let next = OutageGuard(environment: env, policy: Policy())
+        env.now += 5
+        next.resume(elapsed: guardian.status.elapsed + 5, carryover: carried)
+        next.tick(ac())
+        XCTAssertTrue(env.mounts.isEmpty, "not on the first look")
+        XCTAssertNotNil(next.status.untilStandDown, "the stand-down starts over")
+        XCTAssertFalse(env.notifications.contains("Power outage (resumed)"), "the power is back: no outage banner")
+        var t: TimeInterval = 0
+        while t < 30 { env.now += 5; t += 5; next.tick(ac()) }
+        XCTAssertEqual(env.mounts, ["Flitslig"])
+        XCTAssertEqual(next.status.phase, .line)
+        XCTAssertTrue(env.notifications.contains("Power restored"))
+    }
+
+    func testRelaunchDuringTheStandDownCarriesOnIfThePowerFailsAgain() {
+        env.add(flitslig, holders: [lightroom])
+        guardian.tick(ac())
+        onBattery(until: 60)
+        run(ac(), for: 10)
+        let next = OutageGuard(environment: env, policy: Policy())
+        env.now += 5
+        next.resume(elapsed: guardian.status.elapsed + 5, carryover: guardian.carryover)
+        next.tick(ac())
+        env.now += 5
+        next.tick(battery())                          // fails again, 80 s into the outage
+        XCTAssertEqual(next.status.elapsed, 80, accuracy: 0.01, "the outage's own clock, not a new one")
+        onBatteryWith(next, until: 125)
+        XCTAssertEqual(env.quits, [lightroom.appKey], "the soft stage at 2 min of this outage")
+    }
+
+    func testCarriedBlindOutageDoesNotRemountWithoutAUPS() {
+        // M1, found in review: the UPS went missing on line power and the volumes were forced
+        // (the unmount policy); after a relaunch, no UPS has been seen in this process, so the
+        // first reading went down the line branch and remounted with nothing watching.
+        guardian.policy.upsGoneOnLine = .unmount
+        env.add(flitslig)
+        guardian.tick(ac())
+        run(.absent(), for: 15)
+        XCTAssertEqual(env.unmounts, ["Flitslig"])
+        let next = OutageGuard(environment: env, policy: guardian.policy)
+        next.resume(elapsed: guardian.status.elapsed, carryover: guardian.carryover)
+        var t: TimeInterval = 0
+        while t < 120 { env.now += 5; t += 5; next.tick(.absent()) }
+        XCTAssertTrue(env.mounts.isEmpty, "no UPS, no remount")
+        XCTAssertTrue(next.status.volumes[0].unmountedByGuard)
+        while t < 160 { env.now += 5; t += 5; next.tick(ac()) }
+        XCTAssertEqual(env.mounts, ["Flitslig"], "back once the UPS is, on line power")
+    }
+
+    func testRelaunchKeepsWhatTheOwnerDid() {
+        // M1, found in review: a postponement, "Don't Quit Apps" and "Unmount Now" were lost.
+        guardian.policy.softAt = .never
+        env.add(flitslig, holders: [lightroom])
+        guardian.tick(ac())
+        onBattery(until: 100)
+        guardian.postpone(seconds: 600)
+        guardian.skipQuittingAppsThisOutage()
+        onBattery(until: 310)
+        let c = guardian.carryover
+        XCTAssertEqual(c.postponed, 600)
+        XCTAssertTrue(c.noQuit)
+        let next = OutageGuard(environment: env, policy: guardian.policy)
+        env.now += 5
+        next.resume(elapsed: guardian.status.elapsed + 5, carryover: c)
+        next.tick(battery())
+        XCTAssertTrue(env.unmounts.isEmpty, "postponed to 15 min: not forced at 5 min 15 s")
+        XCTAssertEqual(next.status.untilHard!, 900 - 315, accuracy: 0.01)
+        XCTAssertFalse(next.status.quitAppsThisOutage)
+        next.unmountNow()
+        XCTAssertEqual(env.unmounts, ["Flitslig"])
+        XCTAssertTrue(next.carryover.unmountRequested)
+        XCTAssertEqual(try JSONDecoder().decode(Carryover.self, from: JSONEncoder().encode(next.carryover)), next.carryover)
+    }
+
+    func testRelaunchAfterThePowerDownDoesNotDoItAgain() {
+        // M1, found in review: "sleep once safe" ran, the owner woke the Mac mid-outage, the
+        // app relaunched, and the new copy slept the Mac again at once.
+        guardian.policy.powerDownWhenSafe = true
+        env.add(flitslig)
+        guardian.tick(ac())
+        onBattery(until: 125)
+        XCTAssertEqual(env.performed, [.sleep])
+        XCTAssertTrue(guardian.carryover.poweredDown)
+        let next = OutageGuard(environment: env, policy: guardian.policy)
+        env.now += 60
+        next.resume(elapsed: guardian.status.elapsed + 60, carryover: guardian.carryover)
+        onBatteryWith(next, until: 400)
+        XCTAssertEqual(env.performed, [.sleep], "once per outage, across a relaunch too")
     }
 
     func testSleepNeverRunsWhileAVolumeIsStillMounted() {
