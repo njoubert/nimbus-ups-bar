@@ -450,8 +450,11 @@ what each settles:
 Same as the siblings: `VERSION=` in `build.sh`, `CFBundleVersion` = commit count,
 `./build.sh release NOTES.md` builds the stapled app, the DMG and the updater's zip, tags
 `v<VERSION>`, runs the preflight and publishes. Signing reads `SIGN_IDENTITY` / `NOTARY_PROFILE`
-from the git-ignored `.signing` (copy it from a sibling). The GitHub repository
-`njoubert/nimbus-ups-bar` did not exist on 2026-10-10; CI's `update-health` job is
-`continue-on-error` until the first release carries `NimbusUpsBar-<version>.zip`, then drop
-that line. No `docs/screenshot.png` or social card yet: take the screenshot by hand once the
-menu is final (open it, ⇧⌘4, space, click it) and port `SocialCard.swift` from a sibling.
+from the git-ignored `.signing` (copy it from a sibling). Releases: 0.1.0 on 2026-10-11 (DMG +
+zip, notarized). Since then CI's `update-health` job fails a run when the published release
+loses its zip or no longer matches the declared bundle id and team. The DMG step asks Finder
+to lay out the window over AppleScript; the first build from a new host app (VS Code's terminal,
+2026-10-11) needs Automation › Finder for it, and a prompt nobody has answered yet shows up only
+as `AppleEvent timed out (-1712)` with the staging image left mounted. No `docs/screenshot.png`
+or social card yet: take the screenshot by hand once the menu is final (open it, ⇧⌘4, space,
+click it) and port `SocialCard.swift` from a sibling.
