@@ -9,6 +9,13 @@ import NimbusUpdater
 enum Updates {
     static let repo = "njoubert/nimbus-ups-bar"
     static let bundleID = "com.njoubert.nimbusupsbar"
+    /// What `build.sh run` gives the development bundle. A development copy under the release's
+    /// identifier took over the installed copy's Login Items record (macOS follows the bundle
+    /// identifier to whichever copy last asked about it), and launchd then refused the installed
+    /// binary at login (2026-10-11).
+    static let devBundleID = bundleID + ".dev"
+    /// Both, for the one-copy rule: a development copy and the installed one never guard at once.
+    static let bundleIDs = [bundleID, devBundleID]
     /// The Developer ID team the release is signed with; a download signed by anyone else is
     /// refused. Shared with the other Nimbus apps (one Apple ID, one team).
     static let teamID = "93A96TD57U"

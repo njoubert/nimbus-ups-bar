@@ -3,8 +3,11 @@
 #
 #   ./build.sh              debug build → .build/debug/NimbusUpsBar
 #   ./build.sh test         the state-machine tests (swift test)
-#   ./build.sh run [args]   debug build as dist/debug/Nimbus UPS Bar.app, (re)launch it detached.
+#   ./build.sh run [args]   debug build as dist/debug/Nimbus UPS Bar Dev.app, (re)launch it detached.
 #                           Add --fg to run in the foreground instead (logs here, Ctrl-C quits).
+#                           Its identifier is com.njoubert.nimbusupsbar.dev: its own settings (copied
+#                           from the installed copy's on its first run), notifications and agent.
+#                           Launching it quits the installed copy (one guard at a time).
 #   ./build.sh stop         quit every running NimbusUpsBar (dev or installed)
 #   ./build.sh app          release build → dist/Nimbus UPS Bar.app (ad-hoc signed, icon baked in)
 #   ./build.sh dmg          release build → dist/NimbusUpsBar-<version>.dmg, the drag-to-Applications
@@ -29,11 +32,15 @@ cd "$(dirname "$0")"
 NAME=NimbusUpsBar          # executable / target / process name
 APP_NAME="Nimbus UPS Bar"  # what the user sees: the .app, the volume, Login Items
 BUNDLE_ID=com.njoubert.nimbusupsbar
-AGENT_PLIST=com.njoubert.nimbusupsbar.agent.plist   # the launchd agent, inside the bundle
+# The development bundle's own identity. Under the release's identifier a dev copy took over the
+# installed copy's Login Items record, and launchd then refused the installed binary at login
+# (Launch Constraint Violation, 2026-10-11).
+DEV_BUNDLE_ID=$BUNDLE_ID.dev
+DEV_APP_NAME="$APP_NAME Dev"
 VERSION=0.1.0
 INSTALL_DIR=/Applications
 INSTALLED="$INSTALL_DIR/$APP_NAME.app"
-DEV_APP="dist/debug/$APP_NAME.app"
+DEV_APP="dist/debug/$DEV_APP_NAME.app"
 REL_APP="dist/$APP_NAME.app"
 DMG="dist/$NAME-$VERSION.dmg"
 ZIP="dist/$NAME-$VERSION.zip"     # what the auto-updater downloads; a release needs both
@@ -54,17 +61,18 @@ note() { printf '%s%s%s\n' "$dim" "$*" "$reset"; }
 warn() { printf '%s%s%s\n' "$yellow" "$*" "$reset" >&2; }
 
 # Assemble a .app around a built binary: Info.plist, icon, ad-hoc signature.
-#   make_bundle <config: debug|release> <out.app>
+#   make_bundle <config: debug|release> <out.app> <bundle id> <name>
 make_bundle() {
-  local config=$1 app=$2 bin=".build/$1/$NAME"
+  local config=$1 app=$2 bundle_id=$3 name=$4 bin=".build/$1/$NAME"
+  local agent_plist="$bundle_id.agent.plist"
   rm -rf "$app"
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Library/LaunchAgents"
   cp "$bin" "$app/Contents/MacOS/$NAME"
   cp LICENSE "$app/Contents/Resources/LICENSE"
 
   # The launchd agent SMAppService registers (BackgroundAgent.swift owns its contents).
-  "$bin" --agent-plist > "$app/Contents/Library/LaunchAgents/$AGENT_PLIST"
-  plutil -convert xml1 -o /dev/null "$app/Contents/Library/LaunchAgents/$AGENT_PLIST"
+  "$bin" --agent-plist "$bundle_id" > "$app/Contents/Library/LaunchAgents/$agent_plist"
+  plutil -convert xml1 -o /dev/null "$app/Contents/Library/LaunchAgents/$agent_plist"
 
   # The icon is drawn in code; render it to an .iconset and let iconutil pack it.
   local iconset="dist/$config-AppIcon.iconset"
@@ -76,9 +84,9 @@ make_bundle() {
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleName</key><string>$APP_NAME</string>
-  <key>CFBundleDisplayName</key><string>$APP_NAME</string>
-  <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
+  <key>CFBundleName</key><string>$name</string>
+  <key>CFBundleDisplayName</key><string>$name</string>
+  <key>CFBundleIdentifier</key><string>$bundle_id</string>
   <key>CFBundleExecutable</key><string>$NAME</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
@@ -110,11 +118,11 @@ ENTITLEMENTS
   if [ "$config" = release ] && [ -n "$SIGN_IDENTITY" ]; then
     # Hardened runtime + secure timestamp are what notarization requires.
     codesign --force --sign "$SIGN_IDENTITY" --options runtime --timestamp \
-      --entitlements "$ents" --identifier "$BUNDLE_ID" "$app"
+      --entitlements "$ents" --identifier "$bundle_id" "$app"
     codesign --verify --strict --deep "$app"
     note "bundled $app  (signed: $SIGN_IDENTITY)"
   else
-    if ! codesign --force --sign - --entitlements "$ents" --identifier "$BUNDLE_ID" "$app" >/dev/null 2>&1; then
+    if ! codesign --force --sign - --entitlements "$ents" --identifier "$bundle_id" "$app" >/dev/null 2>&1; then
       warn "codesign failed (continuing unsigned)"
     fi
     note "bundled $app  (ad-hoc signed)"
@@ -237,13 +245,17 @@ APPLESCRIPT
   note "packed $out ($(du -h "$out" | cut -f1))"
 }
 
-# Quit every running copy and wait for it to go away. A clean quit (exit 0), not a signal:
-# the launchd agent's KeepAlive treats a signal death as a crash and restarts the copy ten
-# seconds later, which would then (newest copy wins) quit whatever this script launches next.
-# The quit Apple event needs no Automation permission.
+# Quit every running copy, installed and development, and wait for them to go away. A clean
+# quit (exit 0), not a signal: the launchd agent's KeepAlive treats a signal death as a crash and
+# restarts the copy ten seconds later, which would then (newest copy wins) quit whatever this
+# script launches next. The quit Apple event needs no Automation permission.
 stop_all() {
   if pgrep -x "$NAME" >/dev/null; then
-    osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || pkill -x "$NAME" || true
+    local id sent=0
+    for id in "$BUNDLE_ID" "$DEV_BUNDLE_ID"; do
+      osascript -e "if application id \"$id\" is running then tell application id \"$id\" to quit" >/dev/null 2>&1 && sent=1
+    done
+    [ $sent = 1 ] || pkill -x "$NAME" || true
     for _ in $(seq 1 50); do pgrep -x "$NAME" >/dev/null || break; sleep 0.1; done
     pgrep -x "$NAME" >/dev/null && { warn "still running, killing"; pkill -9 -x "$NAME" || true; sleep 0.3; }
     say "stopped $NAME"
@@ -271,7 +283,15 @@ case "$cmd" in
     fg=0; args=()
     for a in "$@"; do [ "$a" = "--fg" ] && fg=1 || args+=("$a"); done
     swift build
-    make_bundle debug "$DEV_APP"
+    # The development bundle used to be dist/debug/Nimbus UPS Bar.app under the release's
+    # identifier; left registered with Launch Services, it could still be taken for the release.
+    legacy="dist/debug/$APP_NAME.app"
+    if [ -d "$legacy" ]; then
+      /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "$legacy" >/dev/null 2>&1 || true
+      rm -rf "$legacy"
+      note "removed $legacy (the old development bundle, under the release's identifier)"
+    fi
+    make_bundle debug "$DEV_APP" "$DEV_BUNDLE_ID" "$DEV_APP_NAME"
     stop_all
     if [ $fg = 1 ]; then
       exec "$DEV_APP/Contents/MacOS/$NAME" "${args[@]+"${args[@]}"}"
@@ -287,14 +307,14 @@ case "$cmd" in
 
   app)
     swift build -c release
-    make_bundle release "$REL_APP"
+    make_bundle release "$REL_APP" "$BUNDLE_ID" "$APP_NAME"
     [ -n "$SIGN_IDENTITY" ] && notarize_app "$REL_APP"
     say "built $REL_APP"
     ;;
 
   dmg)
     swift build -c release
-    make_bundle release "$REL_APP"
+    make_bundle release "$REL_APP" "$BUNDLE_ID" "$APP_NAME"
     [ -n "$SIGN_IDENTITY" ] && notarize_app "$REL_APP"
     make_zip "$REL_APP" "$ZIP"
     make_dmg "$REL_APP" "$DMG"
@@ -343,7 +363,7 @@ case "$cmd" in
 
   install)
     swift build -c release
-    make_bundle release "$REL_APP"
+    make_bundle release "$REL_APP" "$BUNDLE_ID" "$APP_NAME"
     [ -n "$SIGN_IDENTITY" ] && notarize_app "$REL_APP"
     stop_all
     if [ -e "$INSTALLED" ]; then

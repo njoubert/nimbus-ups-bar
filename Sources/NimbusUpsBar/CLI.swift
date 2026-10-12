@@ -19,7 +19,7 @@ enum CLI {
         case volumes
         case checkUpdate
         case preflight(app: String)
-        case agentPlist
+        case agentPlist(bundleID: String)
         case printMenu
         case dumpHIDRaw(path: String)
         case afterSafe(action: String)
@@ -30,8 +30,8 @@ enum CLI {
 
     static func run(_ cmd: Command) -> Int32 {
         switch cmd {
-        case .agentPlist:
-            Swift.print(BackgroundAgent.plist(executable: Updates.executableName))
+        case .agentPlist(let bundleID):
+            Swift.print(BackgroundAgent.plist(executable: Updates.executableName, label: BackgroundAgent.label(bundleID: bundleID)))
             return 0
 
         case .dumpHIDRaw(let path):

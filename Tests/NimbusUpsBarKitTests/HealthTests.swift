@@ -29,10 +29,11 @@ final class HealthTests: XCTestCase {
 
     func assess(_ r: UPSReading, hidAge: TimeInterval? = 1, hidAttached: Bool = true, upsSeen: Bool = true,
                 internalBattery: PowerSources.InternalBattery? = nil, protectedMounted: Int = 1, staleAfter: TimeInterval = 60,
-                zeroLoadFor: TimeInterval? = nil, notifications: Health.NotificationAccess = .allowed) -> [Health.Item] {
+                zeroLoadFor: TimeInterval? = nil, notifications: Health.NotificationAccess = .allowed,
+                agentStartFailure: String? = nil) -> [Health.Item] {
         Health.assess(reading: r, hidAge: hidAge, hidAttached: hidAttached, upsSeen: upsSeen,
                       internalBattery: internalBattery, protectedMounted: protectedMounted, staleAfter: staleAfter,
-                      zeroLoadFor: zeroLoadFor, notifications: notifications)
+                      zeroLoadFor: zeroLoadFor, notifications: notifications, agentStartFailure: agentStartFailure)
     }
 
     func texts(_ items: [Health.Item]) -> [String] { items.map(\.text) }
@@ -152,6 +153,17 @@ final class HealthTests: XCTestCase {
         XCTAssertEqual(level(assess(.absent(), upsSeen: true, notifications: .blockedByMacOS), "Notifications are blocked by macOS"), .warning, "also with no UPS")
     }
 
+    func testAgentThatLaunchdCannotStartIsAWarning() {
+        // 2026-10-11: Run in Background was on, launchd failed to start the installed copy at
+        // every login (exit 78), and the menu, once opened by hand, looked healthy.
+        let failing = assess(fine(), agentStartFailure: "exit code 78: EX_CONFIG")
+        XCTAssertEqual(level(failing, "Run in Background is not starting the app"), .warning)
+        XCTAssertEqual(Health.headline(failing)?.label, "not starting at login")
+        XCTAssertTrue(failing.last?.detail?.contains("exit code 78: EX_CONFIG") ?? false, "the reason launchd gave")
+        XCTAssertEqual(texts(assess(fine(), agentStartFailure: nil)), texts(assess(fine())))
+        XCTAssertEqual(level(assess(.absent(), upsSeen: true, agentStartFailure: "exit code 78: EX_CONFIG"), "Run in Background is not starting the app"), .warning, "also with no UPS")
+    }
+
     func testRuntimeNearTheUPSLimit() {
         var r = fine(); r.runtimeSeconds = 540
         XCTAssertEqual(level(assess(r), "Runtime estimate only 9 min"), .warning, "within twice the 5 min limit")
@@ -226,6 +238,7 @@ final class HealthTests: XCTestCase {
         out += assess(fine(), hidAttached: false)
         out += assess(fine(), internalBattery: PowerSources.InternalBattery(percent: 15, isCharging: false, onAC: false))
         out += assess(fine(), notifications: .blockedByMacOS)
+        out += assess(fine(), agentStartFailure: "exit code 78: EX_CONFIG")
         return out.filter(\.level.isConcern)
     }
 

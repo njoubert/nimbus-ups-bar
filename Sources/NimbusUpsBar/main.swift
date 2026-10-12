@@ -12,7 +12,8 @@ import UpsGuardCore
 //   --enable-agent          register this bundle's launchd agent (run at login, restart on crash) and exit
 //   --disable-agent         unregister the agent and exit
 //   --agent-status          print the agent's state and exit
-//   --agent-plist           print the agent plist build.sh puts into the bundle, and exit
+//   --agent-plist [ID]      print the agent plist build.sh puts into the bundle with identifier ID
+//                           (default: the release's), and exit
 //   --render-icon PATH [--size PX]   write the app icon as a PNG and exit
 //   --render-iconset DIR    write an .iconset (for iconutil) and exit
 //   --render-dmg-background DIR [--signed]   write the disk image's background PNGs and exit
@@ -37,7 +38,7 @@ import UpsGuardCore
 
 func usage() -> Never {
     print("""
-    usage: NimbusUpsBar [--enable-agent | --disable-agent | --agent-status | --agent-plist]
+    usage: NimbusUpsBar [--enable-agent | --disable-agent | --agent-status | --agent-plist [BUNDLE_ID]]
                         [--render-icon PATH [--size PX]] [--render-iconset DIR]
                         [--render-dmg-background DIR [--signed]] [--dump-bar PATH] [--dump-chart PATH]
                         [--dump-settings DIR] [--dump-inspector DIR] [--inspect-json] [--dump-hid-raw PATH] [--after-safe sleep|shutdown]
@@ -54,6 +55,18 @@ var renderIconsetDir: String?
 var renderDMGBackgroundDir: String?
 var dmgSigned = false
 var cli: CLI.Command?
+
+// The development bundle has a defaults domain of its own; its first run starts from the
+// owner's settings in the release's domain rather than from the defaults.
+if Bundle.main.bundleIdentifier == Updates.devBundleID {
+    let d = UserDefaults.standard
+    let leaving: Set = [UPSMonitor.outageStartKey, CarryoverStore.key, BackgroundAgent.registeredDefaultsKey]
+    if let seed = DevDefaults.seed(release: d.persistentDomain(forName: Updates.bundleID),
+                                   dev: d.persistentDomain(forName: Updates.devBundleID) ?? [:], leaving: leaving) {
+        for (k, v) in seed { d.set(v, forKey: k) }
+        d.synchronize()
+    }
+}
 
 var args = Array(CommandLine.arguments.dropFirst())
 func takeValue(_ flag: String) -> String {
@@ -76,7 +89,10 @@ while !args.isEmpty {
     case "--agent-status":
         print(BackgroundAgent.statusDescription)
         exit(0)
-    case "--agent-plist": cli = .agentPlist
+    case "--agent-plist":
+        let id = args.first.flatMap { $0.hasPrefix("--") ? nil : $0 }
+        if id != nil { args.removeFirst() }
+        cli = .agentPlist(bundleID: id ?? Updates.bundleID)
     case "--render-icon": renderIconPath = takeValue(a)
     case "--size": renderIconSize = Int(takeValue(a)) ?? 1024
     case "--render-iconset": renderIconsetDir = takeValue(a)
@@ -184,9 +200,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // One copy only. The newest one wins: when the launchd agent starts a copy while a
         // hand-launched one is running (or the other way round), the older copy is asked to
-        // quit, exits 0, and launchd's KeepAlive leaves it alone.
-        if dumpBarPath == nil, let bid = Bundle.main.bundleIdentifier {
-            let others = NSRunningApplication.runningApplications(withBundleIdentifier: bid).filter { $0.processIdentifier != getpid() }
+        // quit, exits 0, and launchd's KeepAlive leaves it alone. The development bundle counts
+        // as a copy too: two guards would both quit apps and unmount the same drives.
+        if dumpBarPath == nil, Bundle.main.bundleIdentifier != nil {
+            let others = Updates.bundleIDs.flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0) }
+                .filter { $0.processIdentifier != getpid() }
             for o in others {
                 Log.shared.append("another copy is running (pid \(o.processIdentifier), \(o.bundleURL?.path ?? "?")); asking it to quit")
                 o.terminate()

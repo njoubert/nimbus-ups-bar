@@ -16,9 +16,14 @@ import ServiceManagement
 /// The registration is tied to the bundle that makes the call, so `build.sh install` runs the
 /// installed copy with `--enable-agent`, and `uninstall` runs it with `--disable-agent` before
 /// deleting it (otherwise a dangling entry is left behind).
+///
+/// The label follows the bundle identifier, so the development bundle (`Updates.devBundleID`)
+/// has an agent of its own and never touches the installed copy's.
 enum BackgroundAgent {
-    static let plistName = "com.njoubert.nimbusupsbar.agent.plist"
-    static let label = "com.njoubert.nimbusupsbar.agent"
+    static func label(bundleID: String) -> String { "\(bundleID).agent" }
+    /// The bare binary has no bundle identifier; it has no agent either (`isAvailable`).
+    static var label: String { label(bundleID: Bundle.main.bundleIdentifier ?? Updates.bundleID) }
+    static var plistName: String { "\(label).plist" }
     /// Set once the app has registered itself (first launch from /Applications, or
     /// `--enable-agent`) or the user has toggled it; after that, never auto-register again.
     static let registeredDefaultsKey = "agentRegistered"
@@ -52,7 +57,7 @@ enum BackgroundAgent {
 
     /// The agent plist, as `build.sh` writes it into the bundle. Kept here so the label, the
     /// executable name and the KeepAlive rule live next to the code that registers them.
-    static func plist(executable: String) -> String {
+    static func plist(executable: String, label: String) -> String {
         """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

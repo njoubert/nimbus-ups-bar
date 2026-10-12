@@ -14,7 +14,7 @@
 </p>
 
 ```
-./build.sh run            # debug build → dist/debug/Nimbus UPS Bar.app, launch it (add --fg for logs here)
+./build.sh run            # debug build → dist/debug/Nimbus UPS Bar Dev.app, launch it (add --fg for logs here)
 ./build.sh stop           # quit it
 ./build.sh test           # the outage state machine against fakes (swift test)
 ./build.sh install        # release build → /Applications/Nimbus UPS Bar.app, register its launchd agent, launch
@@ -150,7 +150,8 @@ shutdown imminent. Yellow: on battery, charge below the UPS's warning limit on l
 voltage at or below nominal while not charging (a worn pack floats low), load at 0 % for a
 minute (nothing is on the battery outlets?) or above 80 %, line voltage outside or near the edge
 of the transfer window, boost or buck active, no USB reading for a minute, notifications blocked
-by macOS (the outage banners would never appear). Hollow grey notes that colour nothing:
+by macOS (the outage banners would never appear), *Run in Background* on while launchd's last
+attempt to start the app failed (after a restart nothing would guard the drives). Hollow grey notes that colour nothing:
 recharging after an outage, self-test not run yet, notifications turned off in Settings. Green
 otherwise, with the figures.
 
@@ -158,7 +159,11 @@ otherwise, with the figures.
 bundle (System Settings › General › Login Items › Allow in the Background). It starts the app at
 login and restarts it if it ever crashes; a deliberate Quit stays quit. The first launch from
 `/Applications` registers it once; turning it off afterwards sticks. Only one copy ever runs: a
-second copy asks the first to quit and takes over.
+second copy asks the first to quit and takes over. The development build (`./build.sh run`) is
+*Nimbus UPS Bar Dev*, `com.njoubert.nimbusupsbar.dev`, with its own settings (copied from the
+installed copy's on its first run), notification permission and agent: under the release's
+identifier it took over the installed copy's Login Items entry, and macOS then refused to start
+the installed copy at login.
 
 **Updates.** Through [nimbus-updater](https://github.com/njoubert/nimbus-updater), as in the
 sibling apps: once a day, and when the menu opens if the last check is stale, it asks GitHub for a
@@ -306,7 +311,8 @@ at the keyboard, with nothing important open on the drives.
 8. **The agent.** After `./build.sh install`: `kill -9` the running copy and see it back within
    10 s; toggle *Run in Background* off and on, with `pgrep -x NimbusUpsBar` showing one pid each
    time; `./build.sh run` while the agent is enabled (it quits the agent copy cleanly, and the
-   dev copy stays).
+   dev copy stays). Then restart the Mac: the icon is back without opening anything, and
+   `launchctl print gui/$(id -u)/com.njoubert.nimbusupsbar.agent` says `state = running`.
 9. **Launch during an outage** (`./build.sh run` with the plug pulled): the clock resumes from the
    previous copy's start. Relaunch once more after the drives are unmounted: when the power
    returns they are remounted, and the log says the previous copy had unmounted them.
