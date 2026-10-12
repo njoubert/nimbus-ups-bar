@@ -28,9 +28,11 @@ final class HealthTests: XCTestCase {
     }
 
     func assess(_ r: UPSReading, hidAge: TimeInterval? = 1, hidAttached: Bool = true, upsSeen: Bool = true,
-                internalBattery: PowerSources.InternalBattery? = nil, protectedMounted: Int = 1, staleAfter: TimeInterval = 60) -> [Health.Item] {
+                internalBattery: PowerSources.InternalBattery? = nil, protectedMounted: Int = 1, staleAfter: TimeInterval = 60,
+                zeroLoadFor: TimeInterval? = nil, notifications: Health.NotificationAccess = .allowed) -> [Health.Item] {
         Health.assess(reading: r, hidAge: hidAge, hidAttached: hidAttached, upsSeen: upsSeen,
-                      internalBattery: internalBattery, protectedMounted: protectedMounted, staleAfter: staleAfter)
+                      internalBattery: internalBattery, protectedMounted: protectedMounted, staleAfter: staleAfter,
+                      zeroLoadFor: zeroLoadFor, notifications: notifications)
     }
 
     func texts(_ items: [Health.Item]) -> [String] { items.map(\.text) }
@@ -116,13 +118,38 @@ final class HealthTests: XCTestCase {
 
     func testLoad() {
         var r = fine(); r.loadPercent = 0; r.loadWatts = 0
-        XCTAssertEqual(level(assess(r), "No load on the battery outlets"), .warning)
+        XCTAssertEqual(level(assess(r, zeroLoadFor: 60), "No load on the battery outlets"), .warning)
         r.loadPercent = 85; r.loadWatts = 850
         XCTAssertEqual(level(assess(r), "Load 850 W (85 %)"), .warning)
         r.loadPercent = 10; r.loadWatts = 104.6
         XCTAssertEqual(assess(r).first { $0.text.hasPrefix("Load") }?.text, "Load 105 W (10 % of 1000 W)")
         r.loadWatts = nil
         XCTAssertNil(assess(r).first { $0.text.hasPrefix("Load") })
+    }
+
+    func testZeroLoadWarnsOnlyOnceItHasLasted() {
+        // QA 2026-10-11, T5: one reading of 0 % turned the bolt yellow; the first read of the
+        // day is often 0 %.
+        var r = fine(); r.loadPercent = 0; r.loadWatts = 0
+        XCTAssertNil(assess(r).first { $0.text.hasPrefix("No load") }, "how long is not known: no warning")
+        XCTAssertNil(assess(r, zeroLoadFor: 0).first { $0.text.hasPrefix("No load") }, "one reading")
+        XCTAssertNil(assess(r, zeroLoadFor: 59).first { $0.text.hasPrefix("No load") })
+        XCTAssertEqual(level(assess(r, zeroLoadFor: 60), "No load on the battery outlets"), .warning)
+        XCTAssertEqual(assess(r, zeroLoadFor: 10).first { $0.text.hasPrefix("Load") }?.text, "Load 0 W (0 % of 1000 W)", "until then it is just a figure")
+        XCTAssertEqual(Health.overall(assess(r, zeroLoadFor: 10)), .good)
+    }
+
+    func testNotificationsBlockedByMacOSIsAWarning() {
+        // QA 2026-10-11, T2: a denial was swallowed, and an unattended guard whose banners never
+        // appear looked healthy.
+        let blocked = assess(fine(), notifications: .blockedByMacOS)
+        XCTAssertEqual(level(blocked, "Notifications are blocked by macOS"), .warning)
+        XCTAssertEqual(Health.headline(blocked)?.label, "notifications blocked")
+        XCTAssertEqual(level(assess(fine(), notifications: .offInSettings), "Notifications are off in Settings"), .info, "the owner's own choice: a note")
+        XCTAssertEqual(level(assess(fine(), notifications: .notDecided), "Notifications not allowed yet"), .info)
+        XCTAssertEqual(texts(assess(fine(), notifications: .allowed)), texts(assess(fine())))
+        XCTAssertEqual(texts(assess(fine(), notifications: .unavailable)), texts(assess(fine())), "the bare binary has no channel to warn about")
+        XCTAssertEqual(level(assess(.absent(), upsSeen: true, notifications: .blockedByMacOS), "Notifications are blocked by macOS"), .warning, "also with no UPS")
     }
 
     func testRuntimeNearTheUPSLimit() {
@@ -190,7 +217,7 @@ final class HealthTests: XCTestCase {
         for t in [UPSReading.SelfTest.error, .warning, .aborted] { r = fine(); r.selfTest = t; out += assess(r) }
         r = fine(); r.chargePercent = 12; out += assess(r)
         r = fine(); r.flags = [.acPresent]; r.batteryVoltage = 23.9; out += assess(r)
-        r = fine(); r.loadPercent = 0; out += assess(r)
+        r = fine(); r.loadPercent = 0; out += assess(r, zeroLoadFor: 120)
         r = fine(); r.loadPercent = 105; r.loadWatts = 1050; out += assess(r)
         r = fine(); r.runtimeSeconds = 590; out += assess(r)
         r = fine(); r.inputVoltage = 142; out += assess(r)
@@ -198,6 +225,7 @@ final class HealthTests: XCTestCase {
         out += assess(fine(), hidAge: 3600)
         out += assess(fine(), hidAttached: false)
         out += assess(fine(), internalBattery: PowerSources.InternalBattery(percent: 15, isCharging: false, onAC: false))
+        out += assess(fine(), notifications: .blockedByMacOS)
         return out.filter(\.level.isConcern)
     }
 

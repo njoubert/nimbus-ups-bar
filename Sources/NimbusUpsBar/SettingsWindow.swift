@@ -101,6 +101,21 @@ class SettingsPane: NSViewController, NSTextFieldDelegate {
     /// value are ignored.
     func reload() {}
 
+    /// A row came or went (a warning, a status line): the pane's size follows, and the window's
+    /// with it, top edge fixed, while this pane is the one on show (the others have no window).
+    func fitToContent() {
+        view.layoutSubtreeIfNeeded()
+        let size = view.fittingSize
+        guard size != preferredContentSize else { return }
+        preferredContentSize = size
+        guard let w = view.window, let content = w.contentView else { return }
+        let dh = size.height - content.frame.height
+        var f = w.frame
+        f.origin.y -= dh
+        f.size.height += dh
+        w.setFrame(f, display: true)
+    }
+
     func withoutActions(_ body: () -> Void) {
         reloading = true
         body()
@@ -347,6 +362,7 @@ final class OutagePane: SettingsPane, NSTableViewDataSource, NSTableViewDelegate
     private var upsGonePowersDown: NSButton!
     private var upsGoneOnLine: NSPopUpButton!
     private var postpone: NSTextField!
+    private var hardWarning: NSImageView!
     private var neverQuitTable: NSTableView!
     private var addApp: NSPopUpButton!
     private var removeApp: NSButton!
@@ -390,7 +406,15 @@ final class OutagePane: SettingsPane, NSTableViewDataSource, NSTableViewDelegate
         form.section("Stages: each begins at whichever ticked condition comes first")
         form.row("", Form.line(header("On battery for"), header("Runtime left ≤"), header("Charge ≤")))
         stageRow("Ask apps to quit:", .soft)
-        stageRow("Force unmount:", .hard)
+        // Shown only while the forced unmount has no time condition (QA 2026-10-11, M3).
+        // A warning sign before the label while the forced unmount has no time condition;
+        // hover for why (QA 2026-10-11, M3). In the label column, so the grid keeps its width.
+        hardWarning = NSImageView()
+        hardWarning.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Warning")?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .regular).applying(.init(paletteColors: [.systemOrange])))
+        hardWarning.setAccessibilityLabel("No time on battery for the forced unmount")
+        form.grid.addRow(with: [Form.line(hardWarning, Form.label("Force unmount:")),
+                                Form.line(cell(.hard, .time), cell(.hard, .runtime), cell(.hard, .charge))])
         stageRow("Sleep or shut down:", .powerDown,
                  hint: "Force unmount needs at least one. The charge gauge sags 20–30 points in the first minute; runtime is the better guide.")
 
@@ -410,7 +434,7 @@ final class OutagePane: SettingsPane, NSTableViewDataSource, NSTableViewDelegate
         }
         powerWhenSafe = Controls.checkbox("Also as soon as every volume is safe", self, #selector(apply))
         form.row("Sleep or shut down means:", Form.stack(powerAction, powerWhenSafe),
-                 hint: "Volumes are forced off first (a minute at most). Test Shut down once at the keyboard: --after-safe.")
+                 hint: "Volumes are forced off first. If one will not come off, a shutdown goes ahead a minute later; a sleep waits for it. Test Shut down once at the keyboard: --after-safe.")
         postpone = Controls.duration(self, #selector(apply))
         form.row("Postpone adds:", postpone,
                  hint: "The outage menu's Postpone moves every time condition out by this much; charge and runtime still apply. 1 min to 1 h.")
@@ -474,6 +498,9 @@ final class OutagePane: SettingsPane, NSTableViewDataSource, NSTableViewDelegate
                     fields[st]?[c]?.isEnabled = v != nil
                 }
             }
+            hardWarning.isHidden = p.hardAt.onBatteryFor != nil
+            hardWarning.toolTip = "No time on battery: the forced unmount depends on the UPS reporting its runtime or charge. "
+                + "If it stops reporting both, \(Duration.text(Policy.hardStandIn)) on battery stands in. The UPS's own low-battery alarm also forces it."
             quitApps.state = p.quitApps ? .on : .off
             quitTimeoutOn.state = p.quitTimeoutSeconds != nil ? .on : .off
             quitTimeout.objectValue = p.quitTimeoutSeconds ?? s.quitTimeoutValue
@@ -811,6 +838,8 @@ final class GeneralPane: SettingsPane {
     private var agent: NSButton!
     private var agentHint: NSTextField!
     private var notifications: NSButton!
+    private var notificationsStatus: NSTextField!
+    private var openNotificationSettings: NSButton!
     private var autoUpdate: NSButton?
 
     init(updater: Updater?) {
@@ -820,6 +849,11 @@ final class GeneralPane: SettingsPane {
 
     required init?(coder: NSCoder) { fatalError("not from a nib") }
 
+    override func viewWillAppear() {
+        super.viewWillAppear()
+        Notifications.shared.refresh(force: true)
+    }
+
     override func build() {
         form.section("Running")
         agent = Controls.checkbox("Run in the background at login", self, #selector(toggleAgent))
@@ -827,7 +861,9 @@ final class GeneralPane: SettingsPane {
         form.grid.addRow(with: [Form.label("Persistence:"), Form.stack(agent, agentHint)])
         form.grid.cell(atColumnIndex: 0, rowIndex: form.grid.numberOfRows - 1).xPlacement = .trailing
         notifications = Controls.checkbox("Show notifications", self, #selector(apply))
-        form.row("Notifications:", notifications,
+        notificationsStatus = Form.hint("")
+        openNotificationSettings = Controls.button("Open Notification Settings…", self, #selector(openSystemNotifications))
+        form.row("Notifications:", Form.stack(notifications, notificationsStatus, openNotificationSettings),
                  hint: "At the transfer, when apps are asked to quit, at each unmount, and when power returns.")
         if updater != nil {
             let b = Controls.checkbox("Check for updates automatically", self, #selector(apply))
@@ -858,6 +894,26 @@ final class GeneralPane: SettingsPane {
                 agentHint.stringValue = "A launchd agent starts the app at login and restarts it if it crashes. Quit stays quit."
             }
             notifications.state = s.notificationsEnabled ? .on : .off
+            let access = Notifications.shared.access
+            switch access {
+            case .blockedByMacOS:
+                notificationsStatus.stringValue = "Blocked by macOS: no outage banner will appear until they are allowed in System Settings › Notifications."
+                notificationsStatus.textColor = .systemOrange
+            case .notDecided:
+                notificationsStatus.stringValue = "macOS has not asked yet."
+                notificationsStatus.textColor = .secondaryLabelColor
+            case .unavailable:
+                notificationsStatus.stringValue = "This binary has no bundle, so it cannot show notifications."
+                notificationsStatus.textColor = .secondaryLabelColor
+            case .allowed, .offInSettings:
+                notificationsStatus.stringValue = ""
+            }
+            let hideButton = access != .blockedByMacOS
+            if notificationsStatus.isHidden != notificationsStatus.stringValue.isEmpty || openNotificationSettings.isHidden != hideButton {
+                notificationsStatus.isHidden = notificationsStatus.stringValue.isEmpty
+                openNotificationSettings.isHidden = hideButton
+                if isViewLoaded, preferredContentSize != .zero { fitToContent() }
+            }
             if let u = updater { autoUpdate?.state = u.automaticChecks ? .on : .off }
         }
     }
@@ -881,6 +937,8 @@ final class GeneralPane: SettingsPane {
     }
 
     @objc private func openLog() { NSWorkspace.shared.open(Log.fileURL) }
+
+    @objc private func openSystemNotifications() { Notifications.openSystemSettings() }
 }
 
 // MARK: - Main menu

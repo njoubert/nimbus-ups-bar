@@ -33,7 +33,8 @@ README before changing the policy or the stages.
 - **`swift test` must pass**, and a change to `OutageGuard` or `Policy` without a scenario in
   `Tests/UpsGuardCoreTests/GuardTests.swift` is not finished. The tests are the only place the
   outage paths run without an outage. Likewise a change to `Health`, `UPSHID.decode`,
-  `VolumeRegistry.state(from:)`, `Holders.describe` or `ReadingMerge` without a fixture test in
+  `VolumeRegistry.state(from:)`, `Holders.describe`, `ReadingMerge`, `HIDReadGate` or
+  `CarryoverStore` without a fixture test in
   `Tests/NimbusUpsBarKitTests/` is not finished: those are the rules that misfire on an input
   nobody tried. The committed HID dumps are the decode's reference: `cp1500pfclcda.json` (2026-10-10,
   values only) and `cp1500pfclcda-full.json` (2026-10-11, `--dump-hid-raw`'s full capture: every
@@ -99,7 +100,13 @@ Sources/NimbusUpsBarKit/     the platform layer, a library so it is testable (Ap
                              quirks); the self-test write
   Volumes.swift              VolumeRegistry: Disk Arbitration callbacks, state(from:) (pure
                              external filter), force unmount, mount
-  Holders.swift              proc_listpidspath → Holder; describe (pure); quit by bundle id
+  Holders.swift              proc_listpidspath → Holder; describe (an app = LaunchServices knows
+                             it, with a UI, or it is such an app's helper); quit by bundle id;
+                             ProcessWorld: the LaunchServices/libproc seam the tests fake
+  HIDReader.swift            HIDReadGate (pure): when a read starts, is written off (10 s), when
+                             a fresh device object is opened; HIDReader runs each read on its own
+                             thread
+  CarryoverStore.swift       the guard's Carryover in UserDefaults, 12 h staleness (pure)
   Health.swift               the health rules → [Item] with a level (pure)
   Merge.swift                ReadingMerge: IOKit's entry + a fresh HID report → one reading (pure)
   Inspector.swift            the Inspector's data: Section/Row, the UPS / power source / health /
@@ -113,8 +120,9 @@ Sources/NimbusUpsBar/        the app
                              / --check-update / --preflight / --agent-plist / --dump-hid-raw
                              / --after-safe
   Monitor.swift              UPSMonitor: timers, the merge, samples for the chart, simulations,
-                             outage persistence, the arming delay; RealEnvironment (the live
-                             GuardEnvironment)
+                             outage persistence (outageStartedAt + the guard's carryover, saved
+                             on every guard change), the arming delay, the App Nap activity;
+                             RealEnvironment (the live GuardEnvironment)
   Settings.swift             UserDefaults: policy (each stage's three conditions as value + on/off
                              flag, "hardRuntime" + "hardRuntimeOn"; migrateLegacyPolicy() copies
                              the pre-2026-10-11 grace/hard/afterSafe keys over once, keeping them),
@@ -126,7 +134,7 @@ Sources/NimbusUpsBar/        the app
   SettingsWindow.swift       the Settings window: NSTabViewController with toolbar tabs, the four
                              panes, Form/Controls helpers, DurationFormatter, the main menu
   Log.swift                  the log file (the Inspector's Events reads its tail), a 1000-line ring, os_log
-  Notifications.swift        UNUserNotificationCenter (bundle only)
+  Notifications.swift        UNUserNotificationCenter (bundle only); whether macOS allows them
   BackgroundAgent.swift      SMAppService.agent + the plist text build.sh bakes in
   PowerActions.swift         sleep assertion, IOPMSleepSystem, the loginwindow shutdown event
   StatusBarController.swift  the bar, the menu, every submenu (UPS Details moved to the Inspector),
@@ -135,11 +143,13 @@ Sources/NimbusUpsBar/        the app
   ChartView.swift            load and charge, two panels, time ticks, newest values in the headers,
                              the charge limit, outage bands, hover readout
   AppIcon.swift, DMGBackground.swift, Updates.swift   as in the siblings
-Tests/UpsGuardCoreTests/     77 scenarios against FakeEnvironment, each rehearsal scenario among them
-Tests/NimbusUpsBarKitTests/  68 checks: the HID decode against both CP1500 fixtures and
+Tests/UpsGuardCoreTests/     97 scenarios against FakeEnvironment, each rehearsal scenario among them
+Tests/NimbusUpsBarKitTests/  89 checks: the HID decode against both CP1500 fixtures and
                              hand-made maps, every health rule (and that each menu row fits), the
-                             DA dictionary filter, the holder resolver, the merge, the Inspector's
-                             sections, JSON, diff and search, the launchctl parser, the log-line kinds
+                             DA dictionary filter, the holder resolver against a fake desk (and
+                             no AppleScript in it), the merge, the Inspector's sections, JSON,
+                             diff and search, the launchctl parser, the log-line kinds, the
+                             stuck-read recovery on real threads, the relaunch carryover store
 docs/                        icon.png (build.sh icon); phase-2-email-notifications.md (design)
 build.sh                     build / test / run / stop / app / dmg / release / install /
                              uninstall / status / icon / clean
@@ -156,7 +166,7 @@ main.
 
 ```
 ./build.sh run [--fg]         debug build as dist/debug/Nimbus UPS Bar.app (quits any running copy first)
-./build.sh test               swift test: the 77 guard scenarios and the 68 platform checks
+./build.sh test               swift test: the 97 guard scenarios and the 89 platform checks
 ./build.sh install            release → /Applications, register the agent (owner's call), launch
 .build/debug/NimbusUpsBar --print        the UPS, health, every HID field, volumes, holders, policy
 .build/debug/NimbusUpsBar --print-menu   the menu built against the real UPS, as an indented tree
@@ -188,18 +198,23 @@ behaviour through the bundle `build.sh run` makes.
 
 Every acting stage begins on a `Trigger` (`Policy.softAt`, `hardAt`, `powerDownAt`): on battery
 ≥ T, runtime ≤ R, charge ≤ C, each optional, **whichever comes first** (`Trigger.reasons`). Charge
-and runtime count only after `ignoreReadingsSeconds` (15 s); postponing moves every time condition
-and no other. `softAt` may be `never` (the stage is skipped); `hardAt` may not (`normalized` puts
+and runtime count only from readings taken after `ignoreReadingsSeconds` (15 s), however long the
+clock then runs; postponing moves every time condition and no other. `softAt` may be `never` (the stage is skipped); `hardAt` may not (`normalized` puts
 the 5 min back). Phases from the first reading on battery: `holding` (nothing touched) → `soft`
 (apps holding files are sent one quit each; a volume unmounts as soon as no app outside the
 never-quit list holds it, or, with `quitTimeoutSeconds` set, once every app holding it was asked
 that long ago; once begun the stage stays begun) → `hard` (`hardAt`, the UPS gone under
-`upsGoneInOutage = .forceUnmount`, shutdown-imminent, *Unmount Now*, or a pending power-down:
-force-unmount everything) → `safe` (sleep hold released) → on line power `restoring` (remount
-what *we* unmounted, retrying every 30 s while the disk is attached; a macOS auto-remount counts).
+`upsGoneInOutage = .forceUnmount`, the UPS's own alarms (shutdown imminent, `belowCapacityLimit`,
+`runtimeLimitExpired`), *Unmount Now*, a pending power-down, or `Policy.hardStandIn` (5 min) when
+`hardAt` has no time condition and the UPS reports none of the figures it needs: force-unmount
+everything; once begun the stage stays begun too, `hardBecause` keeping its reason) → `safe`
+(sleep hold released) → on line power `restoring` (remount what *we* unmounted, retrying every
+30 s while the disk is attached; a macOS auto-remount counts).
 **Power down** (sleep or shut down, `powerDownAction`) is its own stage: `powerDownAt`, or the UPS
 gone with `upsGoneInOutagePowersDown`, sets `powerSince`, which adds "about to …" to the hard
-reasons; the action runs once safe, or `powerDownWait` (60 s) later regardless. With
+reasons; the action runs once safe. A shutdown also runs `powerDownWait` (60 s) later regardless
+(macOS unmounts on the way down); a sleep never runs with a protected volume mounted, because the
+volume would still be mounted when the UPS dies: the guard stays awake, retries, and logs it once. With
 `powerDownWhenSafe` it also runs on reaching safe, but only once an unmount stage was due, so a
 blip with nothing mounted cannot sleep the Mac. Never while standing down, never in a drill, once
 per outage. **The UPS gone on line power** (`upsGoneOnLine`, only once a UPS has been seen):
@@ -211,16 +226,28 @@ unmount of any volume with a share point on it; force still flushes.
 The debounces, all found by the 2026-10-10 review: **line power must stay back for
 `Policy.lineStableSeconds` (30 s)** before `endOutage`; until then the outage continues, the
 limits are judged against the last reading on battery, and the headline counts down. A brownout
-that transfers every few seconds therefore reaches the limits instead of resetting them. **The
+that transfers every few seconds therefore reaches the limits instead of resetting them. While
+standing down no time condition counts (`Trigger.reasons(countTime:)`, the quit timeout and the
+stand-in too): a stage that falls due then begins only if the power fails again; charge, runtime
+and the UPS's alarms still count (found by the 2026-10-11 QA: mains back at 1:55 still asked
+Lightroom to quit at 2:00). **The
 UPS must be absent for `Policy.upsGoneSeconds` (10 s)** before it counts as gone; a one-tick
 absence is a USB re-enumeration. **The sleep hold is evaluated every tick** from whether anything
 is mounted, so a volume that appears mid-outage (or after a relaunch, when Disk Arbitration's
 replay lands after the first tick) gets it. **A failed unmount backs off `unmountRetry` (10 s)**
 and notifies once per volume; a volume still reported mounted within 10 s of a successful unmount
-is left alone (Disk Arbitration's description change can trail the completion). **`resumeElapsed`**
+is left alone (Disk Arbitration's description change can trail the completion). **`resume`**
 lets the app carry an outage across a relaunch: the monitor keeps `outageStartedAt` (wall clock)
-in UserDefaults while an outage runs and hands the elapsed time to the guard at launch; a line
-reading drops it. The monitor also does not tick the live guard for `armDelay` (3 s) after start,
+in UserDefaults while an outage runs, and the guard's `carryover` under `guardCarryover` on every
+guard change: the volumes it unmounted and has not remounted, and for the outage the apps asked
+(with when), the owner's Postpone, Don't Quit Apps and Unmount Now, and whether the Mac was
+already put down. At launch both go to the guard. A first reading on battery resumes the outage;
+a first reading on line power resumes it into a fresh 30 s stand-down (the previous copy may have
+died mid-stand-down; remounting at once would hand a brownout a free remount); either way the
+outage's own state comes back. Remounts need a UPS seen on line power, so a blind outage carried
+across a relaunch does not remount with nothing watching. The first armed tick that finds no
+outage drops a leftover `outageStartedAt`; both keys are dropped after 12 h. (Found by a review
+of the QA fixes, 2026-10-11.) The monitor also does not tick the live guard for `armDelay` (3 s) after start,
 so the first look is at the real desk, not an empty one.
 
 A completion (unmount/mount) that lands mid-tick sets `retick` and the tick runs once more at
@@ -278,16 +305,58 @@ the end, so `safe` is reached the moment the last volume lands rather than two s
   process holds the file; many such helpers are LaunchServices-registered with their own bundle
   id (`com.brave.Browser.helper`, `com.apple.controlcenter.helper`, ChatGPTHelper and iStat Menus
   Helper were all registered on this machine on 2026-10-10), so terminating by pid hits the
-  helper and the parent relaunches it. `Holders.describe` resolves the outermost `.app` and
-  `requestQuit` goes by that bundle id first, pid second. Executables under `/System/` (Dock,
-  Spotlight, Control Center, loginwindow, Finder) are never apps to the resolver.
+  helper and the parent relaunches it. `requestQuit` goes by the resolved app's bundle id first,
+  pid second.
+- **Being inside an `.app` does not make a process an app** (QA 2026-10-11). Homebrew's `python3`
+  runs from `Python.framework/…/Python.app` and is no LaunchServices application; with
+  `xcode-select` pointing into Xcode, `/usr/bin/git`, `swift`, `clang` and VS Code's
+  `sourcekit-lsp` run from inside `Xcode.app`, and SourceKit's XPC service lives in Xcode's
+  toolchain but is launched (ppid 1) for VS Code. LaunchServices also lists background-only
+  processes (`activationPolicy == .prohibited`: `sharingd`, `studentd`, Finder extensions, Adobe's
+  crash processor). So `Holders.describe`: an app is a running application with a UI, or a helper
+  of one (started by it, by the ppid chain, or one of its own XPC services or extensions:
+  `Contents/XPCServices/*.xpc`, `Contents/Frameworks/…/XPCServices/*.xpc`,
+  `Contents/PlugIns/*.appex`). `/Library/Apple/` and `/System/` are never apps, except the
+  user apps Apple ships there: `…/System/Applications/` (Preview, TextEdit, Notes; Safari runs
+  from `/System/Volumes/Preboot/Cryptexes/App/System/Applications/`) and
+  `CoreServices/Applications/` (Archive Utility). On this desk `--holders /` then lists only
+  real UI apps and their helpers and extensions.
+- **Never send an Apple event that waits, least of all on the main thread.** Compiling an
+  `NSAppleScript` "tell application id …" fetches the target's terminology over an Apple event;
+  a process that never answers (Homebrew `python3`) held the main thread for the full 120 s
+  timeout: no ticks, no hard limit, no menu (QA 2026-10-11, H1). `NSRunningApplication.terminate`
+  only sends. `HoldersTests` fails if an AppleScript or `AESend` call appears in `Holders.swift`.
+  (`PowerActions.shutDown` still uses one, to loginwindow, as the last act of an outage.)
+- **`proc_listpidspath` sees only this user's processes without root**: `smbd`, `mds_stores`,
+  `bztransmit` and other users' processes never appear, so the menu says "None of your
+  processes", never "nothing".
 - **A signal is a crash to launchd.** `KeepAlive = {SuccessfulExit = false}` restarts the job
   after `pkill` (SIGTERM) ten seconds later, and the restarted copy, being newest, then quits
   whatever build.sh launched. `stop_all` sends the quit Apple event instead (exit 0, stays quit)
   and `install` unregisters the old bundle's agent before replacing it.
 - **A HID read can wedge.** A stalled `IOHIDDeviceGetValueWithOptions` used to leave the
-  in-flight flag set for the life of the process; the monitor now abandons a read after
-  `hidAbandonAfter` (10 s) and drops a late result by sequence number.
+  in-flight flag set for the life of the process; then, with every read on one serial queue,
+  the next read waited behind the stuck one forever (QA 2026-10-11, M4). Now `HIDReader` runs
+  each read on its own thread of a concurrent queue: one overdue by 10 s is written off and the
+  next starts beside it through a fresh `IOHIDDevice` for the same service (`UPSHID.reopen`:
+  `IOHIDDeviceCreate`, open, its own elements), so two reads never share a device object and
+  the stuck one is never closed under its thread (IOKit's user-space HID objects are not
+  documented as thread-safe). Removals are matched by registry id, since the object in use may
+  not be the manager's. Three stuck threads stop new reads until one returns; a late result is
+  dropped by sequence. Counters in the Inspector's Readings page. Never seen against the real
+  UPS since.
+- **App Nap**: an idle accessory app can be napped, which coalesces the 2 s timer the guard
+  ticks on. The monitor holds `beginActivity(.userInitiatedAllowingIdleSystemSleep)` from
+  `start()` to `stop()` (QA 2026-10-11, M6); it does not stop idle sleep, which the guard's own
+  assertion manages. The Inspector's Service & App page says whether it is held.
+- **A forced unmount leaves SMB clients stale** (verified by the owner, 2026-10-11): after the
+  unmount and remount, `smbd` still exports the share and the Mac Studio's TCP session stays up,
+  but its mount of Flitslig is dead (Finder: "the original item for 'Flitslig' can't be found")
+  until it is ejected and connected again. The remount notification says so.
+- **Notifications can be blocked silently.** `requestAuthorization` answers a denial with
+  `ok == false` and no error; the dev bundle was denied on 2026-10-10. `Notifications` now asks
+  `getNotificationSettings` at launch and at most once a minute, logs changes, and a block is a
+  yellow health item with a button in Settings › General.
 - **Disk Arbitration from Swift:** `kDADiskDescriptionMatchVolumeMountable` and
   `kDADiskDescriptionWatchVolumePath` import as `Unmanaged`; `.takeUnretainedValue()` them.
   Registering an appeared callback replays every existing disk, which is the initial enumeration.
@@ -350,21 +419,28 @@ what each settles:
   question: unattended, that prompt would be a silent no-op shutdown.
 - Agent registration from `/Applications`, the enable/disable hand-over, the clean-quit path in
   `build.sh` (`pgrep -x NimbusUpsBar` after each step), and a `kill -9` restart.
-- A launch mid-outage: the resumed clock (`outageStartedAt`).
+- A launch mid-outage: the resumed clock (`outageStartedAt`) and the carried-over volumes and
+  asks (`guardCarryover`), tested only against the fake.
+- App Nap (the Activity Monitor column) and the notification status of the installed bundle.
+- The wedged-read recovery against the real device, and the enclosure losing power and coming
+  back (Disk Arbitration's disappeared and reappeared callbacks, the auto-mount).
 - Where the charge gauge settles after the first minutes on battery: the one real outage lasted
   2 min 18 s. A ten-minute plug-pull with nothing mounted would show the curve.
-- The SMB client side during a forced unmount: `smbd` is a daemon, so it is never asked and the
-  force unmount cuts the client off at the hard limit. Intended; not watched from the client.
+- (The SMB client side is now known: a client's mount goes stale; see Platform facts.)
 
 ## Keeping it solid
 
 - Every guard change gets a scenario; every decode, health, filter or resolver change gets a
-  fixture case. CI runs both suites and smoke-runs `--print`, `--volumes`, `--print-menu` and
+  fixture case. Write the scenario first and watch it fail against the old code: every QA
+  2026-10-11 scenario was checked that way. A rule about the platform (which process is an app,
+  when a read is written off) belongs behind a seam (`ProcessWorld`, `HIDReadGate`) so the
+  machine it was found on becomes a fixture. CI runs both suites and smoke-runs `--print`, `--volumes`, `--print-menu` and
   `--simulate` with no UPS attached, so a crash in menu code or in the rehearsal shows up on a
   pull request, not on the first click.
 - The 18:25 plug-pull log above is the reference; read a state-machine diff against it.
 - Disk Arbitration, IOKit and `SMAppService` are the layers that shift between macOS releases:
-  run a drill after every macOS major update and write the date here. Last drill: none yet.
+  run a drill after every macOS major update and write the date here. Last drill: 2026-10-11, two
+  through the QA harness (`DrillEnvironment` on Flitslig, macOS 27.0.1); none from the menu yet.
 
 ## Release and distribution
 

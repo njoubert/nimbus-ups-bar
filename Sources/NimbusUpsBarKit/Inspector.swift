@@ -263,13 +263,16 @@ public enum Inspector {
                        subtitle: top.map { "\(names[$0.level] ?? ""): \($0.label)" } ?? "healthy")
     }
 
-    /// The live guard: where the outage stands, what comes next, and the policy it runs.
+    /// The live guard: where the outage stands, what comes next, and the policy it runs. An
+    /// unarmed guard has never been ticked, so its phase and its view of the UPS are not
+    /// facts: they show as "—" (null in the JSON) rather than "Line power" and "UPS present:
+    /// no" beside a UPS page that shows it present (QA 2026-10-11, T4).
     public static func guardian(_ st: OutageGuard.Status, policy: Policy, simulation: String?, armed: Bool = true) -> Section {
         func t(_ v: TimeInterval?) -> String { v.map { Duration.text($0) } ?? "—" }
         var rows: [Row] = [
             Row(group: "State", "Guarding", armed ? "yes" : "no: this process only looks (a command-line run, or the first seconds after launch)"),
-            Row(group: "State", "Phase", st.phase.title),
-            Row(group: "State", "UPS present", st.upsPresent ? "yes" : "no"),
+            Row(group: "State", "Phase", armed ? st.phase.title : "— (not guarding)"),
+            Row(group: "State", "UPS present", armed ? (st.upsPresent ? "yes" : "no") : "— (not looked yet)"),
             Row(group: "State", "On battery for", st.outageStart == nil ? "—" : Duration.text(st.elapsed)),
             Row(group: "State", "Next: ask apps in", t(st.untilSoft)),
             Row(group: "State", "Next: force unmount in", t(st.untilHard)),
@@ -288,7 +291,9 @@ public enum Inspector {
         if let simulation { rows.append(Row(group: "State", "Simulation", simulation)) }
         rows += [
             Row(group: "Policy", "Ask apps to quit at", policy.softAt.summary),
-            Row(group: "Policy", "Force unmount at", policy.hardAt.summary),
+            Row(group: "Policy", "Force unmount at", policy.hardAt.summary,
+                detail: policy.hardAt.onBatteryFor == nil ? "No time condition: \(Duration.text(Policy.hardStandIn)) on battery stands in if the UPS reports neither figure" : nil),
+            Row(group: "Policy", "Always forced by", "the UPS's shutdown-imminent flag, its own low-battery limits, the UPS gone (per policy), Unmount Now"),
             Row(group: "Policy", "Sleep or shut down at", policy.powerDownAt.summary + (policy.powerDownWhenSafe ? ", or once safe" : "")),
             Row(group: "Policy", "Power-down action", policy.powerDownAction.title),
             Row(group: "Policy", "Ask apps to quit", policy.quitApps ? "yes" : "no"),
@@ -304,7 +309,7 @@ public enum Inspector {
             ["onBatteryForSeconds": value(x.onBatteryFor), "runtimeAtMostSeconds": value(x.runtimeAtMost), "chargeAtMostPercent": value(x.chargeAtMost)]
         }
         let json: [String: Any] = [
-            "armed": armed, "phase": st.phase.rawValue, "upsPresent": st.upsPresent, "elapsedSeconds": st.elapsed,
+            "armed": armed, "phase": armed ? st.phase.rawValue : NSNull(), "upsPresent": armed ? st.upsPresent : NSNull(), "elapsedSeconds": st.elapsed,
             "untilSoftSeconds": value(st.untilSoft), "untilHardSeconds": value(st.untilHard), "untilPowerDownSeconds": value(st.untilPowerDown),
             "untilQuitTimeoutSeconds": value(st.untilQuitTimeout), "untilStandDownSeconds": value(st.untilStandDown),
             "upsAbsentForSeconds": value(st.upsAbsentFor), "blind": st.blind, "powerDownPending": st.powerDownPending,
@@ -312,6 +317,7 @@ public enum Inspector {
             "quitAppsThisOutage": st.quitAppsThisOutage, "lastOutageSeconds": value(st.lastOutageSeconds), "simulation": value(simulation),
             "policy": [
                 "summary": policy.summary, "softAt": trig(policy.softAt), "hardAt": trig(policy.hardAt), "powerDownAt": trig(policy.powerDownAt),
+                "hardStandInSeconds": policy.hardAt.onBatteryFor == nil ? Policy.hardStandIn : NSNull(),
                 "powerDownWhenSafe": policy.powerDownWhenSafe, "powerDownAction": policy.powerDownAction.rawValue,
                 "quitApps": policy.quitApps, "quitTimeoutSeconds": value(policy.quitTimeoutSeconds), "neverQuit": policy.neverQuit.sorted(),
                 "upsGoneSeconds": policy.upsGoneSeconds, "upsGoneInOutage": policy.upsGoneInOutage.rawValue,
@@ -335,7 +341,8 @@ public enum Inspector {
             rows.append(Row(group: g, "Mount point", v.mountPoint ?? "—"))
             if !v.detail.isEmpty { rows.append(Row(group: g, "Drive", v.detail)) }
             rows.append(Row(group: g, "Apps holding files", r.appHolders.isEmpty ? "—" : r.appHolders.map(\.shortName).joined(separator: ", ")))
-            rows.append(Row(group: g, "Others holding files", r.otherHolders.isEmpty ? "—" : r.otherHolders.map(\.shortName).joined(separator: ", ")))
+            rows.append(Row(group: g, "Others holding files", r.otherHolders.isEmpty ? "—" : r.otherHolders.map(\.shortName).joined(separator: ", "),
+                            detail: "Only your own processes are visible: smbd, Spotlight, backup agents and other users' processes need root to see."))
             rows.append(Row(group: g, "Unmount or mount in flight", r.inFlight ? "yes" : "no"))
             rows.append(Row(group: g, "Unmounted by the guard", r.unmountedByGuard ? "yes" : "no"))
             if let e = r.lastError { rows.append(Row(group: g, "Last error", e)) }
@@ -345,6 +352,7 @@ public enum Inspector {
         }
         let json: [String: Any] = [
             "mode": mode,
+            "holdersVisible": "this user's processes only; system daemons and other users' processes are not listed",
             "volumes": reports.map { r -> [String: Any] in
                 ["name": r.volume.name, "uuid": r.volume.uuid, "bsdName": value(r.volume.bsdName), "mountPoint": value(r.volume.mountPoint),
                  "attached": r.volume.isAttached, "mounted": r.volume.isMounted, "detail": r.volume.detail,

@@ -29,6 +29,24 @@ public enum Health {
         public var label: String { short ?? text }
     }
 
+    /// Whether the outage notifications can reach the owner.
+    public enum NotificationAccess: Equatable, Sendable {
+        /// Allowed, or not known yet (no false alarm while macOS answers).
+        case allowed
+        /// macOS has not asked the owner yet.
+        case notDecided
+        /// Turned off in this app's Settings › General.
+        case offInSettings
+        /// Turned off for this app in System Settings › Notifications: the banners never appear.
+        case blockedByMacOS
+        /// No bundle (the bare binary): there is no notification channel at all.
+        case unavailable
+    }
+
+    /// How long the UPS has to read 0 % load before that is a warning. One reading of 0 % is
+    /// common (the first read of 2026-10-10 said 0 % and 190 min; the next, 10 % and 72 min).
+    public static let zeroLoadAfter: TimeInterval = 60
+
     public static func overall(_ items: [Item]) -> Level { items.map(\.level).max() ?? .good }
 
     /// The item that sets the overall level, for the menu row and the headline: the first
@@ -39,8 +57,31 @@ public enum Health {
         return items.first { $0.level == top }
     }
 
+    /// `zeroLoadFor`: how long the load has read 0 % without a break (nil: it does not, or
+    /// that is not known). `notifications`: whether the outage banners can reach the owner.
     public static func assess(reading r: UPSReading, hidAge: TimeInterval?, hidAttached: Bool, upsSeen: Bool,
-                              internalBattery: PowerSources.InternalBattery?, protectedMounted: Int, staleAfter: TimeInterval = 60) -> [Item] {
+                              internalBattery: PowerSources.InternalBattery?, protectedMounted: Int, staleAfter: TimeInterval = 60,
+                              zeroLoadFor: TimeInterval? = nil, notifications: NotificationAccess = .allowed) -> [Item] {
+        var out = assessUPS(reading: r, hidAge: hidAge, hidAttached: hidAttached, upsSeen: upsSeen, internalBattery: internalBattery,
+                            protectedMounted: protectedMounted, staleAfter: staleAfter, zeroLoadFor: zeroLoadFor)
+        switch notifications {
+        case .blockedByMacOS:
+            out.append(Item(.warning, "Notifications are blocked by macOS",
+                            "System Settings › Notifications › Nimbus UPS Bar has them off, so the outage banners (power out, closing apps, unmounting, power back) never appear. Allow them there, or open Settings › General here.",
+                            short: "notifications blocked"))
+        case .offInSettings:
+            out.append(Item(.info, "Notifications are off in Settings", "Outage banners are not shown; the log still records everything."))
+        case .notDecided:
+            out.append(Item(.info, "Notifications not allowed yet", "macOS has not asked yet, or the question is still on screen."))
+        case .allowed, .unavailable:
+            break
+        }
+        return out
+    }
+
+    private static func assessUPS(reading r: UPSReading, hidAge: TimeInterval?, hidAttached: Bool, upsSeen: Bool,
+                                  internalBattery: PowerSources.InternalBattery?, protectedMounted: Int, staleAfter: TimeInterval,
+                                  zeroLoadFor: TimeInterval?) -> [Item] {
         var out: [Item] = []
         guard r.present else {
             out.append(Item(.bad, upsSeen ? "UPS has disconnected" : "No UPS found",
@@ -93,7 +134,7 @@ public enum Health {
             }
         }
         if let w = r.loadWatts, let pct = r.loadPercent {
-            if pct == 0 {
+            if pct == 0, (zeroLoadFor ?? 0) >= zeroLoadAfter {
                 out.append(Item(.warning, "No load on the battery outlets", "The UPS reports 0 % load. If the display, the drive enclosure and the Mac's charger are plugged into the surge-only outlets, the battery does not back them and an outage kills them at once. Move them to the battery-backed outlets.", short: "nothing on battery outlets"))
             } else if pct >= 80 {
                 out.append(Item(.warning, "Load \(Int(w.rounded())) W (\(pct) %)", "Close to the rating; runtime on battery will be short.", short: "load high (\(pct) %)"))

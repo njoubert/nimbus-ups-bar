@@ -450,15 +450,17 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         if !v.detail.isEmpty { m.addItem(row(label: "Drive", value: v.detail, copy: v.detail)) }
         if let mp = v.mountPoint {
             m.addItem(.separator())
+            // Without root only this user's processes are visible: say so, rather than claim
+            // nothing is using a drive smbd may be serving (QA 2026-10-11, T1).
             let holders = Holders.list(mountPoint: mp)
             if holders.isEmpty {
-                m.addItem(disabled("Nothing has files open on it"))
+                m.addItem(disabled("None of your processes has files open on it"))
             } else {
-                let h = disabled("Processes with files open")
+                let h = disabled("Your processes with files open")
                 m.addItem(h)
                 for holder in holders {
                     let never = Settings.shared.policy.isNeverQuit(holder)
-                    let text = holder.isApp ? "\(holder.shortName)  (pid \(holder.pid))\(never ? " · never quit" : "")" : "\((holder.executable as NSString).lastPathComponent)  (pid \(holder.pid)) · daemon, not asked"
+                    let text = holder.isApp ? "\(holder.shortName)  (pid \(holder.pid))\(never ? " · never quit" : "")" : "\((holder.executable as NSString).lastPathComponent)  (pid \(holder.pid)) · not an app, not asked"
                     let it = NSMenuItem(title: text, action: #selector(copyValue(_:)), keyEquivalent: "")
                     it.target = self
                     it.representedObject = holder.executable
@@ -467,6 +469,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
                     m.addItem(it)
                 }
             }
+            m.addItem(disabled("System daemons (smbd, Spotlight, backups) are not visible"))
         }
         return m
     }
@@ -585,9 +588,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         guard let uuid = sender.representedObject as? String, let v = monitor.volumes.volumes[uuid] else { return }
         let alert = NSAlert()
         alert.messageText = "Unmount \(v.name) now?"
-        let holders = v.mountPoint.map(Holders.list) ?? []
-        let apps = holders.filter(\.isApp).map(\.shortName).uniqued()
-        alert.informativeText = (apps.isEmpty ? "Nothing has files open on it." : "\(apps.joined(separator: ", ")) still ha\(apps.count == 1 ? "s" : "ve") files open on it; the unmount is forced, and they will lose them.")
+        let holders = v.mountPoint.map { Holders.list(mountPoint: $0) } ?? []
+        let names = holders.map(\.shortName).uniqued()
+        alert.informativeText = (names.isEmpty ? "None of your processes has files open on it (system daemons such as smbd are not visible here)."
+            : "\(names.joined(separator: ", ")) still ha\(names.count == 1 ? "s" : "ve") files open on it; the unmount is forced, and \(names.count == 1 ? "it loses them" : "they lose them").")
             + " The volume stays unmounted until you mount it again."
         alert.addButton(withTitle: "Unmount")
         alert.addButton(withTitle: "Cancel")

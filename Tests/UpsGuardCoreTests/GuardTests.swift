@@ -106,9 +106,12 @@ final class GuardTests: XCTestCase {
     /// Tick on battery every 5 s until `elapsed` seconds into the outage (the first tick
     /// starts it), so a scenario can say "at 125 s" and mean exactly that.
     func onBattery(until elapsed: TimeInterval, _ reading: UPSReading? = nil) {
+        onBatteryWith(guardian, until: elapsed, reading)
+    }
+    func onBatteryWith(_ g: OutageGuard, until elapsed: TimeInterval, _ reading: UPSReading? = nil) {
         let r = reading ?? battery()
-        if guardian.status.outageStart == nil { env.now += 5; guardian.tick(r) }
-        while env.now - guardian.status.outageStart! < elapsed { env.now += 5; guardian.tick(r) }
+        if g.status.outageStart == nil { env.now += 5; g.tick(r) }
+        while env.now - g.status.outageStart! < elapsed { env.now += 5; g.tick(r) }
     }
 
     // MARK: Scenarios
@@ -546,13 +549,18 @@ final class GuardTests: XCTestCase {
         XCTAssertEqual(guardian.status.untilHard!, 98, accuracy: 0.01)
     }
 
-    func testResumeIsDroppedByALineReading() {
+    func testResumeOnLinePowerStandsDownThenALaterOutageStartsFromZero() {
         env.add(flitslig)
         guardian.resumeElapsed = 200
         guardian.tick(ac())                           // launched after the power came back
         XCTAssertNil(guardian.resumeElapsed)
+        XCTAssertEqual(guardian.status.untilStandDown!, 30, accuracy: 0.01, "the previous copy may have been mid-stand-down")
+        run(ac(), for: 30)
+        XCTAssertEqual(guardian.status.phase, .line)
+        XCTAssertTrue(env.unmounts.isEmpty)
         onBattery(until: 60)
         XCTAssertEqual(guardian.status.phase, .holding, "a later outage starts from zero")
+        XCTAssertEqual(guardian.status.elapsed, 60, accuracy: 0.01)
     }
 
     func testPowerReturnsRemountInFlightThenFailsAgain() {
@@ -694,7 +702,7 @@ final class GuardTests: XCTestCase {
     func testDrillNeverSleepsOrShutsDown() {
         env.add(flitslig)
         let drill = DrillEnvironment(base: env, speed: 10)
-        var p = Policy(powerDownAt: Trigger(onBatteryFor: 20), powerDownWhenSafe: true, powerDownAction: .shutDown)
+        let p = Policy(powerDownAt: Trigger(onBatteryFor: 20), powerDownWhenSafe: true, powerDownAction: .shutDown)
         let g = OutageGuard(environment: drill, policy: p)
         g.tick(ac())
         var t: TimeInterval = 0
@@ -987,8 +995,11 @@ final class GuardTests: XCTestCase {
         XCTAssertEqual(env.performed, [.sleep])
     }
 
-    func testPowerDownWaitsForTheVolumesThenGoesAnyway() {
+    func testShutDownWaitsForTheVolumesThenGoesAnyway() {
+        // Shutting down unmounts what it can on the way; sleeping does not (see
+        // testSleepNeverRunsWhileAVolumeIsStillMounted), so only a shutdown goes regardless.
         guardian.policy.powerDownAt = Trigger(onBatteryFor: 200)
+        guardian.policy.powerDownAction = .shutDown
         env.unmountFails = [flitslig.uuid]
         env.add(flitslig, holders: [smbd])
         guardian.tick(ac())
@@ -999,7 +1010,7 @@ final class GuardTests: XCTestCase {
         XCTAssertTrue(env.performed.isEmpty, "a minute to get the volumes off")
         XCTAssertGreaterThan(env.unmounts.count, 1, "retried meanwhile")
         onBattery(until: 260)
-        XCTAssertEqual(env.performed, [.sleep], "then the Mac goes down regardless")
+        XCTAssertEqual(env.performed, [.shutDown], "then the Mac goes down regardless")
         XCTAssertTrue(env.lines.contains { $0.contains("still mounted 1 min after the trigger") })
     }
 
@@ -1125,6 +1136,369 @@ final class GuardTests: XCTestCase {
         XCTAssertTrue(env.mounts.isEmpty, "no remount on battery")
     }
 
+    // MARK: QA 2026-10-11: regressions found by the bug hunt
+
+    func testRelaunchWhileSafeStillRemountsWhenPowerReturns() {
+        // M1. The guard unmounted Flitslig, then the app crashed and the agent restarted it.
+        // The new copy has to know the volume is its to remount.
+        env.add(flitslig, holders: [lightroom])
+        env.quitsWhenAsked = [lightroom.appKey]
+        guardian.tick(ac())
+        onBattery(until: 125)
+        XCTAssertEqual(guardian.status.phase, .safe)
+        let carried = guardian.carryover
+        XCTAssertEqual(carried.unmounted, ["B2D1": "Flitslig"])
+        XCTAssertEqual(Array(carried.askedAt.keys), [lightroom.appKey])
+        XCTAssertEqual(carried.askedAt[lightroom.appKey]!, 120, accuracy: 0.01, "seconds into the outage")
+        let next = OutageGuard(environment: env, policy: Policy())
+        env.now += 10
+        next.resume(elapsed: guardian.status.elapsed + 10, carryover: carried)
+        next.tick(battery())
+        XCTAssertEqual(next.status.phase, .safe)
+        XCTAssertTrue(next.status.volumes[0].unmountedByGuard, "the new copy knows it unmounted Flitslig")
+        var t: TimeInterval = 0
+        while t < 35 { env.now += 5; t += 5; next.tick(ac()) }
+        XCTAssertEqual(env.mounts, ["Flitslig"], "remounted once the power stayed back")
+        XCTAssertEqual(next.status.phase, .line)
+        XCTAssertTrue(next.carryover.isEmpty)
+        XCTAssertTrue(env.notifications.contains("Power restored"))
+    }
+
+    func testRelaunchAfterThePowerReturnedStillRemounts() {
+        // M1. The copy died while remounting; the new one starts on line power.
+        env.add(flitslig)
+        guardian.tick(ac())
+        onBattery(until: 120)
+        let carried = guardian.carryover
+        XCTAssertFalse(carried.isEmpty)
+        let next = OutageGuard(environment: env, policy: Policy())
+        next.resume(elapsed: nil, carryover: carried)
+        env.now += 60
+        next.tick(ac())
+        XCTAssertEqual(env.mounts, ["Flitslig"])
+        XCTAssertEqual(next.status.phase, .line)
+    }
+
+    func testRelaunchMidSoftStageDoesNotAskTheAppsAgain() {
+        // M1 (QA scenario S8). Asked at 120 s; the copy relaunches at 130 s.
+        guardian.policy = Policy(quitTimeoutSeconds: 60)
+        env.add(flitslig, holders: [lightroom])
+        guardian.tick(ac())
+        onBattery(until: 130)
+        XCTAssertEqual(env.quits, [lightroom.appKey])
+        let carried = guardian.carryover
+        let next = OutageGuard(environment: env, policy: Policy(quitTimeoutSeconds: 60))
+        env.now += 5
+        next.resume(elapsed: guardian.status.elapsed + 5, carryover: carried)
+        next.tick(battery())
+        XCTAssertEqual(next.status.phase, .soft)
+        XCTAssertEqual(env.quits, [lightroom.appKey], "not asked a second time")
+        XCTAssertEqual(next.status.untilQuitTimeout!, 45, accuracy: 0.01, "the minute still runs from the first ask")
+        XCTAssertEqual(next.status.waitingFor, ["Adobe Lightroom Classic"])
+    }
+
+    func testCarryoverIsOnlyWhatIsUnfinished() {
+        env.add(flitslig)
+        XCTAssertTrue(guardian.carryover.isEmpty)
+        guardian.tick(ac())
+        XCTAssertTrue(guardian.carryover.isEmpty)
+        let c = Carryover(unmounted: ["B2D1": "Flitslig"], askedAt: ["com.adobe.LightroomClassic": 121.5])
+        let data = try! JSONEncoder().encode(c)
+        XCTAssertEqual(try! JSONDecoder().decode(Carryover.self, from: data), c, "it survives the trip through UserDefaults")
+        // A carried ask belongs to the outage it was made in: once that outage stands down on
+        // line power, it is gone.
+        let next = OutageGuard(environment: env, policy: Policy())
+        next.resume(elapsed: 200, carryover: Carryover(askedAt: ["com.adobe.LightroomClassic": 121.5]))
+        next.tick(ac())
+        XCTAssertFalse(next.carryover.isEmpty, "still standing down")
+        var t: TimeInterval = 0
+        while t < 30 { env.now += 5; t += 5; next.tick(ac()) }
+        XCTAssertTrue(next.carryover.isEmpty)
+        env.holderLists["B2D1"] = [lightroom]
+        onBatteryWith(next, until: 125)
+        XCTAssertEqual(env.quits, [lightroom.appKey], "a new outage asks again")
+    }
+
+    func testRelaunchDuringTheStandDownStandsDownAgainBeforeRemounting() {
+        // M1, found in review: the previous copy unmounted Flitslig and the power came back;
+        // it relaunched 15 s into the stand-down. Remounting on the first look skipped the
+        // stand-down that exists for brownouts.
+        env.add(flitslig)
+        guardian.tick(ac())
+        onBattery(until: 125)
+        run(ac(), for: 15)
+        let carried = guardian.carryover
+        let next = OutageGuard(environment: env, policy: Policy())
+        env.now += 5
+        next.resume(elapsed: guardian.status.elapsed + 5, carryover: carried)
+        next.tick(ac())
+        XCTAssertTrue(env.mounts.isEmpty, "not on the first look")
+        XCTAssertNotNil(next.status.untilStandDown, "the stand-down starts over")
+        XCTAssertFalse(env.notifications.contains("Power outage (resumed)"), "the power is back: no outage banner")
+        var t: TimeInterval = 0
+        while t < 30 { env.now += 5; t += 5; next.tick(ac()) }
+        XCTAssertEqual(env.mounts, ["Flitslig"])
+        XCTAssertEqual(next.status.phase, .line)
+        XCTAssertTrue(env.notifications.contains("Power restored"))
+    }
+
+    func testRelaunchDuringTheStandDownCarriesOnIfThePowerFailsAgain() {
+        env.add(flitslig, holders: [lightroom])
+        guardian.tick(ac())
+        onBattery(until: 60)
+        run(ac(), for: 10)
+        let next = OutageGuard(environment: env, policy: Policy())
+        env.now += 5
+        next.resume(elapsed: guardian.status.elapsed + 5, carryover: guardian.carryover)
+        next.tick(ac())
+        env.now += 5
+        next.tick(battery())                          // fails again, 80 s into the outage
+        XCTAssertEqual(next.status.elapsed, 80, accuracy: 0.01, "the outage's own clock, not a new one")
+        onBatteryWith(next, until: 125)
+        XCTAssertEqual(env.quits, [lightroom.appKey], "the soft stage at 2 min of this outage")
+    }
+
+    func testCarriedBlindOutageDoesNotRemountWithoutAUPS() {
+        // M1, found in review: the UPS went missing on line power and the volumes were forced
+        // (the unmount policy); after a relaunch, no UPS has been seen in this process, so the
+        // first reading went down the line branch and remounted with nothing watching.
+        guardian.policy.upsGoneOnLine = .unmount
+        env.add(flitslig)
+        guardian.tick(ac())
+        run(.absent(), for: 15)
+        XCTAssertEqual(env.unmounts, ["Flitslig"])
+        let next = OutageGuard(environment: env, policy: guardian.policy)
+        next.resume(elapsed: guardian.status.elapsed, carryover: guardian.carryover)
+        var t: TimeInterval = 0
+        while t < 120 { env.now += 5; t += 5; next.tick(.absent()) }
+        XCTAssertTrue(env.mounts.isEmpty, "no UPS, no remount")
+        XCTAssertTrue(next.status.volumes[0].unmountedByGuard)
+        while t < 160 { env.now += 5; t += 5; next.tick(ac()) }
+        XCTAssertEqual(env.mounts, ["Flitslig"], "back once the UPS is, on line power")
+    }
+
+    func testRelaunchKeepsWhatTheOwnerDid() {
+        // M1, found in review: a postponement, "Don't Quit Apps" and "Unmount Now" were lost.
+        guardian.policy.softAt = .never
+        env.add(flitslig, holders: [lightroom])
+        guardian.tick(ac())
+        onBattery(until: 100)
+        guardian.postpone(seconds: 600)
+        guardian.skipQuittingAppsThisOutage()
+        onBattery(until: 310)
+        let c = guardian.carryover
+        XCTAssertEqual(c.postponed, 600)
+        XCTAssertTrue(c.noQuit)
+        let next = OutageGuard(environment: env, policy: guardian.policy)
+        env.now += 5
+        next.resume(elapsed: guardian.status.elapsed + 5, carryover: c)
+        next.tick(battery())
+        XCTAssertTrue(env.unmounts.isEmpty, "postponed to 15 min: not forced at 5 min 15 s")
+        XCTAssertEqual(next.status.untilHard!, 900 - 315, accuracy: 0.01)
+        XCTAssertFalse(next.status.quitAppsThisOutage)
+        next.unmountNow()
+        XCTAssertEqual(env.unmounts, ["Flitslig"])
+        XCTAssertTrue(next.carryover.unmountRequested)
+        XCTAssertEqual(try JSONDecoder().decode(Carryover.self, from: JSONEncoder().encode(next.carryover)), next.carryover)
+    }
+
+    func testRelaunchAfterThePowerDownDoesNotDoItAgain() {
+        // M1, found in review: "sleep once safe" ran, the owner woke the Mac mid-outage, the
+        // app relaunched, and the new copy slept the Mac again at once.
+        guardian.policy.powerDownWhenSafe = true
+        env.add(flitslig)
+        guardian.tick(ac())
+        onBattery(until: 125)
+        XCTAssertEqual(env.performed, [.sleep])
+        XCTAssertTrue(guardian.carryover.poweredDown)
+        let next = OutageGuard(environment: env, policy: guardian.policy)
+        env.now += 60
+        next.resume(elapsed: guardian.status.elapsed + 60, carryover: guardian.carryover)
+        onBatteryWith(next, until: 400)
+        XCTAssertEqual(env.performed, [.sleep], "once per outage, across a relaunch too")
+    }
+
+    func testSleepNeverRunsWhileAVolumeIsStillMounted() {
+        // M2. Sleep leaves the volume mounted; when the UPS dies, the enclosure dies with it.
+        // So with sleep pending and the unmount failing, the Mac stays awake and keeps trying.
+        guardian.policy.powerDownAt = Trigger(onBatteryFor: 200)
+        env.unmountFails = [flitslig.uuid]
+        env.add(flitslig, holders: [smbd])
+        guardian.tick(ac())
+        onBattery(until: 600)
+        XCTAssertTrue(env.performed.isEmpty, "not with Flitslig still mounted")
+        XCTAssertGreaterThan(env.unmounts.count, 30, "retried every 10 s the whole time")
+        XCTAssertEqual(env.awake.last, true, "held awake")
+        XCTAssertEqual(guardian.status.phase, .hard)
+        XCTAssertTrue(guardian.status.powerDownPending)
+        XCTAssertEqual(env.lines.filter { $0.hasPrefix("not sleeping") }.count, 1, "said once")
+        env.unmountFails = []
+        onBattery(until: 610)
+        XCTAssertEqual(guardian.status.phase, .safe)
+        XCTAssertEqual(env.performed, [.sleep], "the moment it came off")
+    }
+
+    func testUPSLowBatteryFlagsForceTheUnmount() {
+        // M3. The UPS's own low-battery alarms force the unmount whatever the policy says.
+        for flag in [UPSReading.Flags.belowCapacityLimit, .runtimeLimitExpired] {
+            setUp()
+            guardian.policy = Policy(softAt: .never, hardAt: Trigger(runtimeAtMost: 60, chargeAtMost: 5))
+            env.add(flitslig, holders: [lightroom])
+            guardian.tick(ac())
+            var low = battery(9, runtime: 4 * 60)
+            low.flags = [.discharging, flag]
+            low.lowChargeLimitPercent = 10
+            low.lowRuntimeLimitSeconds = 300
+            onBattery(until: 10, low)
+            XCTAssertTrue(env.unmounts.isEmpty, "\(flag): ignored with the other readings right after the transfer")
+            onBattery(until: 20, low)
+            XCTAssertEqual(env.unmounts, ["Flitslig"], "\(flag)")
+            XCTAssertTrue(guardian.status.hardReasons.contains { $0.contains("its own low-battery limit") }, "\(guardian.status.hardReasons)")
+        }
+    }
+
+    func testForceWithoutATimeConditionStandsInWhenTheUPSGivesNoFigures() {
+        // M3. The owner's policy: force at 10 min runtime or 50 % charge, no time condition.
+        // A UPS that reports neither figure must not leave the volumes mounted all outage.
+        guardian.policy.softAt = .never              // so nothing unmounts the volume but the force
+        guardian.policy.hardAt = Trigger(runtimeAtMost: 600, chargeAtMost: 50)
+        env.add(flitslig)
+        guardian.tick(ac())
+        let noFigures = UPSReading(present: true, name: "CP1500", onBattery: true)
+        onBattery(until: 295, noFigures)
+        XCTAssertTrue(env.unmounts.isEmpty)
+        XCTAssertEqual(guardian.status.untilHard!, 5, accuracy: 0.01, "the stand-in shows as a countdown")
+        onBattery(until: 300, noFigures)
+        XCTAssertEqual(env.unmounts, ["Flitslig"])
+        XCTAssertTrue(guardian.status.hardReasons.contains { $0.contains("no runtime or charge figure") }, "\(guardian.status.hardReasons)")
+    }
+
+    func testForceWithoutATimeConditionWaitsWhileOneFigureCanBeJudged() {
+        // M3. Charge alone is enough to judge a runtime-or-charge policy: no stand-in.
+        guardian.policy.softAt = .never              // so nothing unmounts the volume but the force
+        guardian.policy.hardAt = Trigger(runtimeAtMost: 600, chargeAtMost: 50)
+        env.add(flitslig)
+        guardian.tick(ac())
+        let chargeOnly = UPSReading(present: true, name: "CP1500", onBattery: true, chargePercent: 80)
+        onBattery(until: 1200, chargeOnly)
+        XCTAssertTrue(env.unmounts.isEmpty)
+        XCTAssertNil(guardian.status.untilHard)
+        // A runtime-only policy cannot be judged on charge alone.
+        guardian.policy.hardAt = Trigger(runtimeAtMost: 600)
+        onBattery(until: 1205, chargeOnly)
+        XCTAssertEqual(env.unmounts, ["Flitslig"])
+    }
+
+    func testUPSGoneUnderCarryOnWithoutATimeConditionStandsIn() {
+        // M3. Carrying on after the UPS vanished counts time; with no time condition, the
+        // stand-in is the time that counts. A one-tick absence (re-enumeration) is not enough.
+        guardian.policy.softAt = .never              // so nothing unmounts the volume but the force
+        guardian.policy.hardAt = Trigger(runtimeAtMost: 600, chargeAtMost: 50)
+        guardian.policy.upsGoneInOutage = .keepCounting
+        env.add(flitslig)
+        guardian.tick(ac())
+        onBattery(until: 400)
+        run(.absent(), for: 5)
+        XCTAssertTrue(env.unmounts.isEmpty, "a USB re-enumeration")
+        run(.absent(), for: 10)
+        XCTAssertEqual(env.unmounts, ["Flitslig"])
+    }
+
+    func testStagesDoNotStartWhilePowerIsBackButNotYetTrusted() {
+        // M5. Mains back 5 s before the soft stage: nobody is asked, nothing is unmounted.
+        env.add(flitslig, holders: [lightroom])
+        guardian.tick(ac())
+        onBattery(until: 115)
+        run(ac(), for: 25)
+        XCTAssertTrue(env.quits.isEmpty, "not while the power is back")
+        XCTAssertEqual(guardian.status.phase, .holding)
+        run(ac(), for: 10)
+        XCTAssertEqual(guardian.status.phase, .line)
+        XCTAssertTrue(env.quits.isEmpty)
+        XCTAssertTrue(env.unmounts.isEmpty)
+        // …and 5 s before the forced unmount.
+        setUp()
+        guardian.policy.softAt = .never
+        env.add(flitslig, holders: [lightroom])
+        guardian.tick(ac())
+        onBattery(until: 295)
+        run(ac(), for: 35)
+        XCTAssertTrue(env.unmounts.isEmpty)
+        XCTAssertTrue(env.mounts.isEmpty)
+        XCTAssertEqual(guardian.status.phase, .line)
+    }
+
+    func testQuitTimeoutWaitsWhilePowerIsBackButNotYetTrusted() {
+        // M5. Asked at 120 s with a minute to quit; the power is back at 170 s: the minute runs
+        // out during the stand-down, and Lightroom keeps its volume.
+        guardian.policy = Policy(quitTimeoutSeconds: 60)
+        env.add(flitslig, holders: [lightroom])
+        guardian.tick(ac())
+        onBattery(until: 165)
+        XCTAssertEqual(env.quits, [lightroom.appKey])
+        run(ac(), for: 40)
+        XCTAssertTrue(env.unmounts.isEmpty, "not forced with the power back")
+        XCTAssertEqual(guardian.status.phase, .line)
+    }
+
+    func testAStageDeferredByTheStandDownFiresWhenThePowerFailsAgain() {
+        // M5, the brownout: the time is not lost, only deferred while the mains looks back.
+        env.add(flitslig, holders: [lightroom])
+        guardian.tick(ac())
+        onBattery(until: 115)
+        run(ac(), for: 10)                            // 120 s and 125 s on line
+        XCTAssertTrue(env.quits.isEmpty)
+        run(battery(), for: 5)                        // fails again at 130 s
+        XCTAssertEqual(guardian.status.phase, .soft)
+        XCTAssertEqual(env.quits, [lightroom.appKey])
+    }
+
+    func testChargeStillCountsDuringTheStandDown() {
+        // M5. Only the time conditions wait; charge and runtime are judged against the last
+        // reading on battery (here a tighter limit set while the power is back).
+        guardian.policy.hardAt = Trigger(onBatteryFor: 3600, chargeAtMost: 40)
+        env.add(flitslig)
+        guardian.tick(ac())
+        onBattery(until: 60, battery(45))
+        run(ac(), for: 5)
+        XCTAssertTrue(env.unmounts.isEmpty)
+        guardian.policy.hardAt.chargeAtMost = 50
+        run(ac(), for: 5)
+        XCTAssertEqual(env.unmounts, ["Flitslig"])
+    }
+
+    func testJunkReadingsInsideTheIgnoreWindowStayIgnoredDuringTheStandDown() {
+        // Found while fixing M5: a 10 s blip whose readings were the transfer's junk (0 %) had
+        // them judged once the clock passed 15 s during the stand-down, and forced an unmount
+        // with the power already back. Readings are usable by when they were taken.
+        env.add(flitslig)
+        guardian.tick(ac())
+        onBattery(until: 10, battery(0, runtime: 0))
+        run(ac(), for: 35)
+        XCTAssertTrue(env.unmounts.isEmpty)
+        XCTAssertEqual(guardian.status.phase, .line)
+    }
+
+    func testHardStageHoldsWhileTheGaugeBounces() {
+        // L1. A charge-only limit, an unmount that keeps failing, a gauge going 49, 51, 49…
+        guardian.policy = Policy(softAt: .never, hardAt: Trigger(chargeAtMost: 50))
+        env.unmountFails = [flitslig.uuid]
+        env.add(flitslig)
+        guardian.tick(ac())
+        onBattery(until: 60, battery(49))
+        XCTAssertEqual(guardian.status.phase, .hard)
+        let tries = env.unmounts.count
+        var t: TimeInterval = 60
+        for pct in [51, 49, 51, 52, 51, 53] {
+            t += 10
+            onBattery(until: t, battery(pct))
+            XCTAssertEqual(guardian.status.phase, .hard, "at \(pct) %")
+        }
+        XCTAssertGreaterThanOrEqual(env.unmounts.count, tries + 5, "the retries kept going above the line")
+        XCTAssertEqual(guardian.status.hardReasons, ["charge at 49 %"], "the reason it began with")
+        XCTAssertEqual(env.notifications.filter { $0 == "Unmounting now" }.count, 1, "said once")
+    }
+
     func testDurationParse() {
         XCTAssertEqual(Duration.parse("90"), 90)
         XCTAssertEqual(Duration.parse("90 s"), 90)
@@ -1150,7 +1524,13 @@ final class GuardTests: XCTestCase {
         XCTAssertEqual(Duration.text(125), "2 min 05 s")
         XCTAssertEqual(Duration.text(5400), "1 h 30 min")
         XCTAssertEqual(Duration.countdown(112), "1:52")
+        XCTAssertEqual(Duration.countdown(599), "9:59")
         XCTAssertEqual(Duration.countdown(900), "15 min")
+        XCTAssertEqual(Duration.countdown(659), "10 min", "whole minutes, rounded down")
+        // QA 2026-10-11, T6: the bar said "90 min" where everything else says "1 h 30 min".
+        XCTAssertEqual(Duration.countdown(3600), "1 h")
+        XCTAssertEqual(Duration.countdown(5400), "1 h 30 min")
+        XCTAssertEqual(Duration.countdown(5459), "1 h 30 min")
     }
 
     func testPolicyNormalization() {
