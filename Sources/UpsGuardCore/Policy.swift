@@ -26,12 +26,22 @@ public struct Trigger: Equatable, Sendable {
 
     /// Why the trigger has fired, one phrase per condition met; empty while it has not.
     /// `usable` is false while readings are still ignored after the transfer: only time counts.
-    public func reasons(elapsed: TimeInterval, postponed: TimeInterval, reading: UPSReading, usable: Bool) -> [String] {
+    /// `countTime` is false while line power is back but not yet trusted: the time condition
+    /// waits (it fires at once if the power fails again), the charge and runtime still count.
+    public func reasons(elapsed: TimeInterval, postponed: TimeInterval, reading: UPSReading, usable: Bool, countTime: Bool = true) -> [String] {
         var r: [String] = []
-        if let t = onBatteryFor, elapsed >= t + postponed { r.append("\(Duration.text(elapsed)) on battery") }
+        if countTime, let t = onBatteryFor, elapsed >= t + postponed { r.append("\(Duration.text(elapsed)) on battery") }
         if usable, let limit = chargeAtMost, let pct = reading.chargePercent, pct <= limit { r.append("charge at \(pct) %") }
         if usable, let limit = runtimeAtMost, let rt = reading.runtimeSeconds, rt <= limit { r.append("runtime down to \(Duration.text(TimeInterval(rt)))") }
         return r
+    }
+
+    /// True when nothing in this trigger can fire on what `reading` reports: no time condition,
+    /// and no figure for any condition it has (a runtime limit with no runtime, a charge limit
+    /// with no charge). A trigger that is `never` is not "unjudgeable"; it is off.
+    public func cannotJudge(_ reading: UPSReading) -> Bool {
+        guard onBatteryFor == nil, !isNever else { return false }
+        return (runtimeAtMost == nil || reading.runtimeSeconds == nil) && (chargeAtMost == nil || reading.chargePercent == nil)
     }
 
     /// Seconds until the time condition is met; nil without one.
@@ -138,6 +148,11 @@ public struct Policy: Equatable, Sendable {
     }
 
     public static let defaultHardAt = Trigger(onBatteryFor: 300, runtimeAtMost: 600, chargeAtMost: 50)
+    /// A forced unmount without a time condition waits for the UPS's runtime or charge. When
+    /// the UPS reports neither (both readers failing, or the UPS gone under `keepCounting`),
+    /// this much time on battery stands in, so the stage cannot wait forever. The same five
+    /// minutes `normalized` gives back to a forced unmount with no condition at all.
+    public static let hardStandIn: TimeInterval = 300
 
     public init(softAt: Trigger = Trigger(onBatteryFor: 120), hardAt: Trigger = Policy.defaultHardAt,
                 powerDownAt: Trigger = .never, powerDownWhenSafe: Bool = false, powerDownAction: MacAction = .sleep,
