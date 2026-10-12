@@ -133,6 +133,8 @@ public final class UPSHID: @unchecked Sendable {
     private let manager: IOHIDManager
     private let lock = NSLock()
     private var device: IOHIDDevice?
+    /// The registry id of the UPS's service: what a removal is matched on.
+    private var deviceID: UInt64?
     private var elements: [Element] = []
     private var collections: [RawReport.Collection] = []
     private var deviceInfo: (product: String?, manufacturer: String?, serial: String?) = (nil, nil, nil)
@@ -175,6 +177,22 @@ public final class UPSHID: @unchecked Sendable {
 
     private func attach(_ dev: IOHIDDevice) {
         guard IOHIDDeviceOpen(dev, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess else { return }
+        let loaded = UPSHID.load(dev)
+        lock.withLock {
+            device = dev
+            deviceID = UPSHID.registryID(dev)
+            elements = loaded.elements
+            collections = loaded.collections
+            deviceInfo = loaded.info
+        }
+        let atStart = UPSHID.registryID(dev).map { presentAtOpen.remove($0) != nil } ?? false
+        DispatchQueue.main.async { self.onDeviceChange?(true, atStart) }
+    }
+
+    /// Everything about an open device that does not change: its elements (each with its
+    /// metadata), its collections, and its names.
+    private static func load(_ dev: IOHIDDevice) -> (elements: [Element], collections: [RawReport.Collection],
+                                                     info: (product: String?, manufacturer: String?, serial: String?)) {
         var list: [Element] = []
         var colls: [RawReport.Collection] = []
         if let all = IOHIDDeviceCopyMatchingElements(dev, nil, IOOptionBits(kIOHIDOptionsTypeNone)) as? [IOHIDElement] {
@@ -205,14 +223,7 @@ public final class UPSHID: @unchecked Sendable {
             }
         }
         func prop(_ key: String) -> String? { IOHIDDeviceGetProperty(dev, key as CFString) as? String }
-        lock.withLock {
-            device = dev
-            elements = list
-            collections = colls
-            deviceInfo = (prop(kIOHIDProductKey), prop(kIOHIDManufacturerKey), prop(kIOHIDSerialNumberKey))
-        }
-        let atStart = UPSHID.registryID(dev).map { presentAtOpen.remove($0) != nil } ?? false
-        DispatchQueue.main.async { self.onDeviceChange?(true, atStart) }
+        return (list, colls, (prop(kIOHIDProductKey), prop(kIOHIDManufacturerKey), prop(kIOHIDSerialNumberKey)))
     }
 
     private static func typeName(_ t: IOHIDElementType) -> String {
@@ -230,8 +241,11 @@ public final class UPSHID: @unchecked Sendable {
 
     private func detach(_ dev: IOHIDDevice) {
         lock.withLock {
-            guard device == dev else { return }
+            // By registry id: after a `reopen` the device in use is another object for the
+            // same service than the one the manager reports gone.
+            guard device != nil, deviceID == UPSHID.registryID(dev) else { return }
             device = nil
+            deviceID = nil
             elements = []
             collections = []
         }
@@ -302,6 +316,28 @@ public final class UPSHID: @unchecked Sendable {
             raw.readMillis = Int(Date().timeIntervalSince(t0) * 1000)
         }
         return raw
+    }
+
+    /// A fresh device object for the same UPS, opened, with its own element list, in place
+    /// of the one a read is stuck in: the recovery when reads stop coming back (a USB
+    /// transaction that never completes). The stuck object is left alone, never closed under
+    /// its thread, so no two reads ever share one; it goes when the stuck call lets go of it.
+    /// Blocks on USB, so never on the main thread. False when no UPS is attached or the open
+    /// fails (reads then go on with the old object).
+    public func reopen() -> Bool {
+        guard let old = lock.withLock({ device }) else { return false }
+        let service = IOHIDDeviceGetService(old)
+        guard service != 0, let fresh = IOHIDDeviceCreate(kCFAllocatorDefault, service),
+              IOHIDDeviceOpen(fresh, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess else { return false }
+        let loaded = UPSHID.load(fresh)
+        return lock.withLock {
+            guard let current = device, current === old else { return false }   // unplugged meanwhile
+            device = fresh
+            elements = loaded.elements
+            collections = loaded.collections
+            deviceInfo = loaded.info
+            return true
+        }
     }
 
     /// GET_REPORT for every (type, report ID) the elements name: the device's own bytes.

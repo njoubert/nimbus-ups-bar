@@ -21,7 +21,9 @@ jobs:
       - name: Test the outage state machine and the platform layer
         # UpsGuardCore: the guard's scenarios against the fake desk. NimbusUpsBarKit: the
         # HID decode against the committed CP1500 fixture, the health rules, the Disk
-        # Arbitration filter, the holder resolver, the IOKit+HID merge. No UPS needed.
+        # Arbitration filter, the holder resolver against a fake desk (and a check that no
+        # AppleScript call comes back into it), the IOKit+HID merge, the stuck-read recovery
+        # on real threads, the relaunch carryover. No UPS needed.
         run: swift test
       - name: Smoke-run the command line with no UPS attached
         # The runner has no UPS, no external disk and no window server; every command must
@@ -36,7 +38,9 @@ jobs:
           run "$bin" --print
           run "$bin" --volumes
           run "$bin" --print-menu
-          run "$bin" --inspect-json | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['guard']['armed'] is False; print(sorted(d))"
+          # Unarmed, the guard claims nothing about the UPS (it has never looked): no phase, no
+          # "UPS present: no" beside a UPS page that may show one (QA 2026-10-11, T4).
+          run "$bin" --inspect-json | python3 -c "import json,sys; d=json.load(sys.stdin); g=d['guard']; assert g['armed'] is False and g['phase'] is None and g['upsPresent'] is None, g; print(sorted(d))"
           run "$bin" --agent-status || true
           for s in drain shortBattery upsLostInOutage upsLostOnLine; do run "$bin" --simulate "$s"; done
       - name: Build release

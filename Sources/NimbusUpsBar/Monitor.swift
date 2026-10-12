@@ -65,8 +65,6 @@ final class UPSMonitor {
         var lastPowerSourceEventAt: TimeInterval?
         var hidReads = 0
         var hidEmpty = 0
-        var hidAbandoned = 0
-        var hidDropped = 0
         let startedAt = Date()
     }
     private(set) var hidReadAt: TimeInterval?
@@ -103,12 +101,16 @@ final class UPSMonitor {
     private var timer: Timer?
     private var hidDue: TimeInterval = 0
     private var sampleDue: TimeInterval = 0
-    /// When the HID read now in flight was started (nil: none). A read that has not come
-    /// back after `hidAbandonAfter` (a stalled USB transaction) is written off so the next
-    /// poll may start another; its result, if it ever lands, is dropped by sequence number.
-    private var hidStartedAt: TimeInterval?
-    private var hidSequence = 0
-    static let hidAbandonAfter: TimeInterval = 10
+    /// The HID reads, each on a thread of its own: a read that has not come back after
+    /// `HIDReadGate.abandonAfter` (a stalled USB transaction) is written off and the next
+    /// starts beside it through a freshly opened device object. Its counters are the
+    /// Inspector's (abandoned, dropped, reopened).
+    private(set) lazy var hidReader: HIDReader = {
+        let hid = self.hid
+        let r = HIDReader(fetch: { full in hid.fetch(full: full) }, reopen: { hid.reopen() })
+        r.log = { [weak self] line in self?.log.append(line) }
+        return r
+    }()
     /// The live guard is not ticked before this moment: Disk Arbitration replays the mounted
     /// volumes a beat after registration, and a guard that looks before the replay sees an
     /// empty desk (and, resumed mid-outage with a sleep policy, would act on it).
@@ -122,7 +124,6 @@ final class UPSMonitor {
     /// starting the grace period again.
     static let outageStartKey = "outageStartedAt"
     private var persistedOutage = false
-    private let hidQueue = DispatchQueue(label: "com.njoubert.nimbusupsbar.hid", qos: .utility)
     private var observers: [NSObjectProtocol] = []
     private lazy var environment = RealEnvironment(monitor: self)
 
@@ -130,7 +131,7 @@ final class UPSMonitor {
         volumes = VolumeRegistry(remembered: Settings.shared.knownVolumes)
         live = OutageGuard(environment: RealEnvironment.placeholder, policy: Settings.shared.policy)
         live = OutageGuard(environment: environment, policy: settings.policy)
-        live.onChange = { [weak self] in self?.changed() }
+        live.onChange = { [weak self] in self?.liveChanged() }
         volumes.onChange = { [weak self] in self?.volumesChanged() }
         power.onChange = { [weak self] in self?.poll(reason: "power source change") }
         hid.onDeviceChange = { [weak self] attached, atStart in
@@ -157,15 +158,9 @@ final class UPSMonitor {
         guard timer == nil else { return }
         log.append("Nimbus UPS Bar started: \(Bundle.main.bundlePath); policy \(policyText)")
         armedAt = monotonicNow() + UPSMonitor.armDelay
-        if let began = UserDefaults.standard.object(forKey: UPSMonitor.outageStartKey) as? Date {
-            let ago = Date().timeIntervalSince(began)
-            if ago >= 0, ago < 12 * 3600 {
-                live.resumeElapsed = ago
-                log.append("the previous copy was mid-outage (began \(Duration.text(ago)) ago): resuming its clock if the UPS is still on battery")
-            } else {
-                UserDefaults.standard.removeObject(forKey: UPSMonitor.outageStartKey)
-            }
-        }
+        appNap = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+                                                       reason: "Watching the UPS: the outage guard's clock must not be napped")
+        resumeFromPreviousCopy()
         power.start()
         startTimer()
         poll(reason: "start")
@@ -187,6 +182,62 @@ final class UPSMonitor {
         timer = nil
         power.stop()
         PowerActions.holdAwake(false)
+        if let a = appNap { ProcessInfo.processInfo.endActivity(a); appNap = nil }
+    }
+
+    /// Held from `start()` to `stop()`: App Nap would coalesce the 2 s timer the guard ticks on
+    /// once the app has sat idle (QA 2026-10-11, M6). It does not stop the Mac idle-sleeping;
+    /// the guard's own assertion handles that during an outage.
+    private(set) var appNap: NSObjectProtocol?
+
+    // MARK: Carrying an outage across a relaunch
+
+    /// A crash restart, an update or toggling the agent mid-outage: carry on with the previous
+    /// copy's clock (`outageStartedAt`), the volumes it unmounted (so they are remounted) and
+    /// the apps it asked (so they are not asked twice). Both are dropped after twelve hours.
+    private func resumeFromPreviousCopy() {
+        let d = UserDefaults.standard
+        var elapsed: TimeInterval?
+        if let began = d.object(forKey: UPSMonitor.outageStartKey) as? Date {
+            let ago = Date().timeIntervalSince(began)
+            if ago >= 0, ago < CarryoverStore.maxAge {
+                elapsed = ago
+                log.append("the previous copy was mid-outage (began \(Duration.text(ago)) ago): resuming its clock if the UPS is still on battery")
+            } else {
+                d.removeObject(forKey: UPSMonitor.outageStartKey)
+            }
+        }
+        // The first armed tick that finds no outage then clears `outageStartedAt`: left behind,
+        // a stale start would be resumed by some later launch.
+        persistedOutage = elapsed != nil
+        let carried = CarryoverStore.decode(d.data(forKey: CarryoverStore.key), now: Date())
+        if carried == nil { d.removeObject(forKey: CarryoverStore.key) }
+        guard elapsed != nil || carried != nil else { return }
+        let c = carried ?? Carryover()
+        live.resume(elapsed: elapsed, carryover: c)
+        savedCarryover = live.carryover
+        if !c.unmounted.isEmpty {
+            log.append("the previous copy unmounted \(c.unmounted.values.sorted().joined(separator: ", ")) and had not remounted it: remounting once the power is back")
+        }
+        if !c.askedAt.isEmpty {
+            log.append("the previous copy asked \(c.askedAt.keys.sorted().joined(separator: ", ")) to quit: not asking again this outage")
+        }
+    }
+
+    /// What was last written under `CarryoverStore.key`, so an unchanged carryover is not rewritten.
+    private var savedCarryover = Carryover()
+
+    /// The live guard ticked or finished an action: save what the next copy would need, then
+    /// tell the listeners. Saved on every change rather than every timer tick, so an unmount
+    /// that completes a second before a crash is not forgotten.
+    private func liveChanged() {
+        let c = live.carryover
+        if c != savedCarryover {
+            savedCarryover = c
+            if let data = CarryoverStore.encode(c, at: Date()) { UserDefaults.standard.set(data, forKey: CarryoverStore.key) }
+            else { UserDefaults.standard.removeObject(forKey: CarryoverStore.key) }
+        }
+        changed()
     }
 
     var policyText: String {
@@ -213,10 +264,8 @@ final class UPSMonitor {
         stats.polls += 1
         if reason == "power source change" { stats.powerSourceEvents += 1; stats.lastPowerSourceEventAt = now }
         let busy = snap.ups.onBattery || simulation != nil || menuOpen || inspectorOpen
-        let hidBusy = hidStartedAt.map { now - $0 < UPSMonitor.hidAbandonAfter } ?? false
-        if now >= hidDue, !hidBusy, hid.isAttached {
+        if now >= hidDue, hid.isAttached, readHID(now: now) {
             hidDue = now + (busy ? settings.busyReadInterval : settings.lineReadInterval)
-            readHID(now: now)
         }
         reading = merge(iops: iops, hid: hidReport, hidAt: hidReadAt, now: now)
         if now >= sampleDue || snap.ups.onBattery != samples.last?.onBattery {
@@ -224,42 +273,31 @@ final class UPSMonitor {
             record(reading, now: now)
         }
         tickGuards(now: now)
+        Notifications.shared.refresh()
         changed()
     }
 
-    private func readHID(now: TimeInterval) {
-        if let s = hidStartedAt {
-            stats.hidAbandoned += 1
-            log.append("a HID read started \(Duration.text(now - s)) ago has not returned; starting another")
-        }
-        hidStartedAt = now
-        hidSequence += 1
-        let seq = hidSequence
-        let hid = self.hid
+    /// Start a HID read unless one is in flight (or too many are stuck); false when none started.
+    private func readHID(now: TimeInterval) -> Bool {
         // Everything (outputs, every report, the descriptor, the properties) only while the
         // Inspector is on screen, live or paused; otherwise the guard's own reads stay light.
         let full = inspectorVisible || fullNext
-        fullNext = false
-        hidQueue.async { [weak self] in
-            let raw = hid.fetch(full: full)
-            let report = raw.map { UPSHID.decode($0, now: now) }
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let self else { return }
-                    guard seq == self.hidSequence else { self.stats.hidDropped += 1; return }
-                    self.hidStartedAt = nil
-                    self.stats.hidReads += 1
-                    if report == nil { self.stats.hidEmpty += 1 }
-                    if let report {
-                        self.hidRaw = raw
-                        self.hidReport = report
-                        self.hidReadAt = monotonicNow()
-                        self.reading = self.merge(iops: self.iops, hid: report, hidAt: self.hidReadAt, now: self.hidReadAt!)
-                        self.changed()
-                    }
-                }
-            }
+        let decision = hidReader.read(full: full, now: now) { [weak self] raw in
+            guard let self else { return }
+            self.stats.hidReads += 1
+            guard let raw else { self.stats.hidEmpty += 1; return }
+            let at = monotonicNow()
+            let report = UPSHID.decode(raw, now: now)
+            self.hidRaw = raw
+            self.hidReport = report
+            self.hidReadAt = at
+            self.noteLoad(report.reading, at: at)
+            self.reading = self.merge(iops: self.iops, hid: report, hidAt: at, now: at)
+            self.changed()
         }
+        guard case .start = decision else { return false }
+        fullNext = false
+        return true
     }
 
     private func merge(iops: UPSReading, hid: UPSHID.Report?, hidAt: TimeInterval?, now: TimeInterval) -> UPSReading {
@@ -436,9 +474,20 @@ final class UPSMonitor {
     // MARK: Health
 
     var health: [Health.Item] {
-        Health.assess(reading: reading, hidAge: hidReadAt.map { monotonicNow() - $0 }, hidAttached: hid.isAttached,
-                      upsSeen: upsSeen, internalBattery: internalBattery, protectedMounted: protectedMountedCount,
-                      staleAfter: settings.hidStaleAfter)
+        let now = monotonicNow()
+        return Health.assess(reading: reading, hidAge: hidReadAt.map { now - $0 }, hidAttached: hid.isAttached,
+                             upsSeen: upsSeen, internalBattery: internalBattery, protectedMounted: protectedMountedCount,
+                             staleAfter: settings.hidStaleAfter, zeroLoadFor: zeroLoadSince.map { now - $0 },
+                             notifications: Notifications.shared.access)
+    }
+
+    /// Since when every HID read has said 0 % load (nil: the last one did not): one such read
+    /// is not a warning (QA 2026-10-11, T5).
+    private(set) var zeroLoadSince: TimeInterval?
+
+    private func noteLoad(_ r: UPSReading, at: TimeInterval) {
+        guard let pct = r.loadPercent else { return }
+        zeroLoadSince = pct == 0 ? (zeroLoadSince ?? at) : nil
     }
 
     var protectedMountedCount: Int { volumes.mounted.filter { settings.isProtected($0) }.count }

@@ -178,6 +178,34 @@ final class InspectorTests: XCTestCase {
         XCTAssertEqual((j["policy"] as? [String: Any])?["summary"] as? String, Policy().summary)
     }
 
+    func testUnarmedGuardClaimsNothingAboutTheUPS() throws {
+        // QA 2026-10-11, T4: `--inspect-json` said "UPS present: no" and "Line power" from a
+        // guard that had never been ticked, beside a UPS page showing the UPS present.
+        let s = Inspector.guardian(OutageGuard.Status(), policy: Policy(), simulation: nil, armed: false)
+        XCTAssertEqual(s.rows.first { $0.label == "Phase" }?.value, "— (not guarding)")
+        XCTAssertTrue(s.rows.first { $0.label == "UPS present" }?.value.hasPrefix("—") == true)
+        let j = try parse(Inspector.json(s.json))
+        XCTAssertEqual(j["armed"] as? Bool, false)
+        XCTAssertTrue(j["phase"] is NSNull)
+        XCTAssertTrue(j["upsPresent"] is NSNull)
+        let armed = try parse(Inspector.json(Inspector.guardian(OutageGuard.Status(), policy: Policy(), simulation: nil).json))
+        XCTAssertEqual(armed["upsPresent"] as? Bool, false, "an armed guard's view is a fact")
+    }
+
+    func testTimeLessForcedUnmountSaysWhatStandsIn() throws {
+        var p = Policy()
+        p.hardAt = Trigger(runtimeAtMost: 600, chargeAtMost: 50)
+        let s = Inspector.guardian(OutageGuard.Status(), policy: p, simulation: nil)
+        let row = s.rows.first { $0.label == "Force unmount at" }
+        XCTAssertEqual(row?.value, "10 min runtime or 50 % charge")
+        XCTAssertEqual(row?.detail, "No time condition: 5 min on battery stands in if the UPS reports neither figure")
+        XCTAssertNil(Inspector.guardian(OutageGuard.Status(), policy: Policy(), simulation: nil).rows.first { $0.label == "Force unmount at" }?.detail)
+        let j = try parse(Inspector.json(s.json))
+        XCTAssertEqual((j["policy"] as? [String: Any])?["hardStandInSeconds"] as? Double, 300)
+        let d = try parse(Inspector.json(Inspector.guardian(OutageGuard.Status(), policy: Policy(), simulation: nil).json))
+        XCTAssertTrue((d["policy"] as? [String: Any])?["hardStandInSeconds"] is NSNull)
+    }
+
     func testVolumesSection() throws {
         let v = VolumeState(uuid: "B2D1", name: "Flitslig", bsdName: "disk9s1", mountPoint: "/Volumes/Flitslig")
         let lr = Holder(pid: 100, executable: "/Applications/Lightroom.app/Contents/MacOS/Lightroom", appName: "Lightroom", bundleID: "com.adobe.lr")

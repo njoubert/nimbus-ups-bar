@@ -116,7 +116,7 @@ final class InspectorModel {
     }
 
     private func readings(now: TimeInterval) -> Inspector.Section {
-        let m = monitor, s = Settings.shared, st = m.stats
+        let m = monitor, s = Settings.shared, st = m.stats, gate = m.hidReader.gate
         let reasons = [m.reading.onBattery ? "on battery" : nil, m.simulation != nil ? "simulation" : nil,
                        m.menuOpen ? "menu open" : nil, m.inspectorOpen ? "Inspector open" : nil].compactMap { $0 }
         func ago(_ t: TimeInterval?) -> String { t.map { Duration.text(now - $0) + " ago" } ?? "never" }
@@ -131,8 +131,10 @@ final class InspectorModel {
             Inspector.Row(group: "USB HID", "Last read", ago(m.hidReadAt) + (m.hidReport.map { " in \($0.readMillis) ms" } ?? "")),
             Inspector.Row(group: "USB HID", "Reads", "\(st.hidReads)"),
             Inspector.Row(group: "USB HID", "Reads that returned nothing", "\(st.hidEmpty)"),
-            Inspector.Row(group: "USB HID", "Reads abandoned (stuck over \(Int(UPSMonitor.hidAbandonAfter)) s)", "\(st.hidAbandoned)"),
-            Inspector.Row(group: "USB HID", "Late results dropped", "\(st.hidDropped)"),
+            Inspector.Row(group: "USB HID", "Reads written off (stuck over \(Int(HIDReadGate.abandonAfter)) s)", "\(gate.abandoned)"),
+            Inspector.Row(group: "USB HID", "Stuck reads still out", "\(gate.stuck.count)"),
+            Inspector.Row(group: "USB HID", "Device reopened after stuck reads", "\(gate.reopens)"),
+            Inspector.Row(group: "USB HID", "Late results dropped", "\(gate.dropped)"),
             Inspector.Row(group: "macOS", "Polls", "\(st.polls)"),
             Inspector.Row(group: "macOS", "Power-source change events", "\(st.powerSourceEvents)"),
             Inspector.Row(group: "macOS", "Last change event", ago(st.lastPowerSourceEventAt)),
@@ -143,7 +145,8 @@ final class InspectorModel {
             "lineReadSeconds": s.lineReadInterval, "busyReadSeconds": s.busyReadInterval, "currentReadSeconds": m.currentReadInterval,
             "fastReadReasons": reasons, "hidFreshForSeconds": s.hidFreshFor, "hidStaleAfterSeconds": s.hidStaleAfter,
             "hidAttached": m.hid.isAttached, "hidFullCapture": m.inspectorVisible, "hidLastReadAgeSeconds": Inspector.value(m.hidReadAt.map { now - $0 }),
-            "hidReads": st.hidReads, "hidEmpty": st.hidEmpty, "hidAbandoned": st.hidAbandoned, "hidDropped": st.hidDropped,
+            "hidReads": st.hidReads, "hidEmpty": st.hidEmpty, "hidAbandoned": gate.abandoned, "hidStuck": gate.stuck.count,
+            "hidReopens": gate.reopens, "hidDropped": gate.dropped,
             "polls": st.polls, "powerSourceEvents": st.powerSourceEvents,
             "lastPowerSourceEventAgeSeconds": Inspector.value(st.lastPowerSourceEventAt.map { now - $0 }),
             "chartSamples": m.samples.count, "chartWindowSeconds": s.historyWindow,
@@ -176,7 +179,8 @@ final class InspectorModel {
             Inspector.Row(group: "This copy", "Process", "pid \(getpid())"),
             Inspector.Row(group: "This copy", "Started by", byLaunchd ? "launchd (the background agent)" : "hand or Finder (not the agent)"),
             Inspector.Row(group: "This copy", "Running for", Duration.text(Date().timeIntervalSince(monitor.stats.startedAt))),
-            Inspector.Row(group: "This copy", "Notifications", Notifications.available ? (Settings.shared.notificationsEnabled ? "on" : "off in Settings") : "unavailable (no bundle)"),
+            Inspector.Row(group: "This copy", "Notifications", Notifications.shared.accessText),
+            Inspector.Row(group: "This copy", "App Nap", monitor.appNap != nil ? "prevented while the guard runs" : "not prevented (this process is not guarding)"),
             Inspector.Row(group: "This copy", "Automatic update checks", updater.map { $0.automaticChecks ? "on" : "off" } ?? "—"),
             Inspector.Row(group: "This copy", "Log file", Log.fileURL.path),
         ]
@@ -188,6 +192,7 @@ final class InspectorModel {
             "version": version, "build": build, "bundlePath": b.bundlePath, "installedInApplications": installed,
             "pid": Int(getpid()), "startedByLaunchd": byLaunchd, "runningSeconds": Date().timeIntervalSince(monitor.stats.startedAt),
             "notificationsAvailable": Notifications.available, "notificationsEnabled": Settings.shared.notificationsEnabled,
+            "notificationsAccess": "\(Notifications.shared.access)", "appNapPrevented": monitor.appNap != nil,
             "automaticUpdateChecks": Inspector.value(updater?.automaticChecks), "logFile": Log.fileURL.path,
         ]
         let sub = "\(BackgroundAgent.statusDescription) · \(byLaunchd ? "started by launchd" : "not started by launchd") · \(installed ? "/Applications" : "development build")"
