@@ -467,7 +467,11 @@ final class RealEnvironment: GuardEnvironment {
 
     func requestQuit(_ holder: Holder) {
         MainActor.assumeIsolated {
-            if !Holders.requestQuit(holder) { Log.shared.append("could not send a quit to \(holder.shortName) (pid \(holder.pid))") }
+            switch Holders.requestQuit(holder) {
+            case .sent: break
+            case .notSent: Log.shared.append("could not send a quit to \(holder.shortName) (pid \(holder.pid))")
+            case .notAnApp: Log.shared.append("cannot ask \(holder.shortName) (pid \(holder.pid)) to quit: not a running application")
+            }
         }
     }
 

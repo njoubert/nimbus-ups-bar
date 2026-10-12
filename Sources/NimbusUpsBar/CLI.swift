@@ -206,7 +206,7 @@ enum CLI {
 
         case .holders(let path):
             let list = Holders.list(mountPoint: path)
-            if list.isEmpty { Swift.print("nothing has files open on \(path)") }
+            if list.isEmpty { Swift.print("none of your processes has files open on \(path) (system daemons and other users' processes are not visible without root)") }
             for h in list { Swift.print(describe(h)) }
             return 0
 
