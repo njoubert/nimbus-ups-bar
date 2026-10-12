@@ -9,6 +9,16 @@
             "target": "NimbusUpsBar",
             "configuration": "debug",
             "preLaunchTask": "swift: Build Debug NimbusUpsBar"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:nimbus-ups-bar}",
+            "name": "Release NimbusUpsBar",
+            "target": "NimbusUpsBar",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release NimbusUpsBar"
         }
     ]
 }

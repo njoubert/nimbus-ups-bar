@@ -18,6 +18,10 @@ final class SettingsWindowController: NSWindowController {
         window.styleMask = [.titled, .closable, .miniaturizable]
         window.toolbarStyle = .preference
         window.isReleasedWhenClosed = false
+        // A menu bar app is usually not the active app while this window is on screen (the
+        // owner clicks elsewhere, or the activation did not stick), and AppKit shows tooltips
+        // only for the active app unless the window asks: the Force unmount warning is a tooltip.
+        window.allowsToolTipsWhenApplicationIsInactive = true
         super.init(window: window)
         // The window took its size from the tab view's placeholder, not from the first pane.
         if let first = tabs.tabViewItems.first?.viewController { window.setContentSize(first.preferredContentSize) }
