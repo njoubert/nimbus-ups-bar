@@ -59,9 +59,12 @@ public enum Health {
 
     /// `zeroLoadFor`: how long the load has read 0 % without a break (nil: it does not, or
     /// that is not known). `notifications`: whether the outage banners can reach the owner.
+    /// `agentStartFailure`: Run in Background is on but launchd's last attempt to start the app
+    /// failed, and why (`LaunchdJob.startFailure`); nil when it did not or the agent is off.
     public static func assess(reading r: UPSReading, hidAge: TimeInterval?, hidAttached: Bool, upsSeen: Bool,
                               internalBattery: PowerSources.InternalBattery?, protectedMounted: Int, staleAfter: TimeInterval = 60,
-                              zeroLoadFor: TimeInterval? = nil, notifications: NotificationAccess = .allowed) -> [Item] {
+                              zeroLoadFor: TimeInterval? = nil, notifications: NotificationAccess = .allowed,
+                              agentStartFailure: String? = nil) -> [Item] {
         var out = assessUPS(reading: r, hidAge: hidAge, hidAttached: hidAttached, upsSeen: upsSeen, internalBattery: internalBattery,
                             protectedMounted: protectedMounted, staleAfter: staleAfter, zeroLoadFor: zeroLoadFor)
         switch notifications {
@@ -75,6 +78,11 @@ public enum Health {
             out.append(Item(.info, "Notifications not allowed yet", "macOS has not asked yet, or the question is still on screen."))
         case .allowed, .unavailable:
             break
+        }
+        if let why = agentStartFailure {
+            out.append(Item(.warning, "Run in Background is not starting the app",
+                            "Run in Background is on, but macOS's last attempt to start Nimbus UPS Bar failed (\(why)), so after a restart or a crash nothing guards the drives until the app is opened by hand. Turn Run in Background off and on again in this menu to register it afresh.",
+                            short: "not starting at login"))
         }
         return out
     }

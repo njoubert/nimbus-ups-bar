@@ -25,6 +25,19 @@ public enum LaunchdJob {
         return String(data: data, encoding: .utf8)
     }
 
+    /// Why launchd's last attempt to start the job failed, or nil if it did not: the job is not
+    /// running and its last exit code is not 0. That is a spawn launchd gave up on, not a quit
+    /// (exit 0, the menu's Quit or the newest copy taking over) and not a crash (a signal, which
+    /// KeepAlive restarts). On 2026-10-11 the installed copy's agent sat at "spawn scheduled",
+    /// "last exit code = 78: EX_CONFIG" after every login: a development copy with the same
+    /// bundle identifier had taken over its Login Items record.
+    public static func startFailure(_ text: String?) -> String? {
+        let job = Dictionary(parse(text), uniquingKeysWith: { a, _ in a })
+        guard let state = job["state"], state != "running",
+              let exit = job["last exit code"], let code = Int(exit.prefix { $0 != ":" }), code != 0 else { return nil }
+        return "exit code \(exit)"
+    }
+
     /// The top-level "key = value" lines that say whether the job is healthy.
     public static func parse(_ text: String?) -> [(String, String)] {
         guard let text else { return [] }

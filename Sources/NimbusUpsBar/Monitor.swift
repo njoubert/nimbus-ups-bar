@@ -122,7 +122,7 @@ final class UPSMonitor {
     /// The wall-clock start of the outage the live guard is in, so a relaunch mid-outage (a
     /// crash restart, an update, toggling the agent) carries the clock on instead of
     /// starting the grace period again.
-    static let outageStartKey = "outageStartedAt"
+    nonisolated static let outageStartKey = "outageStartedAt"
     private var persistedOutage = false
     private var observers: [NSObjectProtocol] = []
     private lazy var environment = RealEnvironment(monitor: self)
@@ -164,6 +164,11 @@ final class UPSMonitor {
         power.start()
         startTimer()
         poll(reason: "start")
+        checkAgent()
+        let t = Timer(timeInterval: 60, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.checkAgent() } }
+        t.tolerance = 5
+        RunLoop.main.add(t, forMode: .common)
+        agentTimer = t
     }
 
     /// The tick: the guard's clock, and the read cadence when busy. Rebuilt when that setting changes.
@@ -180,6 +185,8 @@ final class UPSMonitor {
     func stop() {
         timer?.invalidate()
         timer = nil
+        agentTimer?.invalidate()
+        agentTimer = nil
         power.stop()
         PowerActions.holdAwake(false)
         if let a = appNap { ProcessInfo.processInfo.endActivity(a); appNap = nil }
@@ -478,7 +485,40 @@ final class UPSMonitor {
         return Health.assess(reading: reading, hidAge: hidReadAt.map { now - $0 }, hidAttached: hid.isAttached,
                              upsSeen: upsSeen, internalBattery: internalBattery, protectedMounted: protectedMountedCount,
                              staleAfter: settings.hidStaleAfter, zeroLoadFor: zeroLoadSince.map { now - $0 },
-                             notifications: Notifications.shared.access)
+                             notifications: Notifications.shared.access, agentStartFailure: agentStartFailure)
+    }
+
+    // MARK: Run in Background
+
+    /// Why launchd's last attempt to start this bundle's agent failed, while Run in Background
+    /// is on; nil when it did not, the agent is off, or this copy has none (the bare binary). On
+    /// 2026-10-11 the installed copy's agent failed at every login and nothing said so.
+    private(set) var agentStartFailure: String?
+    private var agentTimer: Timer?
+    private var agentChecking = false
+
+    /// At start and every minute, off the main thread: the status is a call to macOS's Login
+    /// Items service and `launchctl print` is a process.
+    private func checkAgent() {
+        guard BackgroundAgent.isAvailable, !agentChecking else { return }
+        agentChecking = true
+        let label = BackgroundAgent.label
+        DispatchQueue.global(qos: .utility).async {
+            let failure = BackgroundAgent.isEnabled ? LaunchdJob.startFailure(LaunchdJob.print(label: label)) : nil
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.agentChecking = false
+                    guard failure != self.agentStartFailure else { return }
+                    if let failure {
+                        self.log.append("Run in Background is on, but launchd could not start the app (\(failure))")
+                    } else {
+                        self.log.append("Run in Background: launchd starts the app again")
+                    }
+                    self.agentStartFailure = failure
+                    self.changed()
+                }
+            }
+        }
     }
 
     /// Since when every HID read has said 0 % load (nil: the last one did not): one such read

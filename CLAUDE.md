@@ -33,8 +33,8 @@ README before changing the policy or the stages.
 - **`swift test` must pass**, and a change to `OutageGuard` or `Policy` without a scenario in
   `Tests/UpsGuardCoreTests/GuardTests.swift` is not finished. The tests are the only place the
   outage paths run without an outage. Likewise a change to `Health`, `UPSHID.decode`,
-  `VolumeRegistry.state(from:)`, `Holders.describe`, `ReadingMerge`, `HIDReadGate` or
-  `CarryoverStore` without a fixture test in
+  `VolumeRegistry.state(from:)`, `Holders.describe`, `ReadingMerge`, `HIDReadGate`,
+  `CarryoverStore`, `LaunchdJob.startFailure` or `DevDefaults` without a fixture test in
   `Tests/NimbusUpsBarKitTests/` is not finished: those are the rules that misfire on an input
   nobody tried. The committed HID dumps are the decode's reference: `cp1500pfclcda.json` (2026-10-10,
   values only) and `cp1500pfclcda-full.json` (2026-10-11, `--dump-hid-raw`'s full capture: every
@@ -107,12 +107,15 @@ Sources/NimbusUpsBarKit/     the platform layer, a library so it is testable (Ap
                              a fresh device object is opened; HIDReader runs each read on its own
                              thread
   CarryoverStore.swift       the guard's Carryover in UserDefaults, 12 h staleness (pure)
+  DevDefaults.swift          the dev bundle's first-run copy of the release's settings, never
+                             the outage state (pure)
   Health.swift               the health rules → [Item] with a level (pure)
   Merge.swift                ReadingMerge: IOKit's entry + a fresh HID report → one reading (pure)
   Inspector.swift            the Inspector's data: Section/Row, the UPS / power source / health /
                              guard / volumes sections, JSON (sorted, pretty), the change diff, the
                              page search (substring match, heading-aware filter, JSON ranges) (pure)
-  Launchd.swift              `launchctl print gui/<uid>/<label>` and its parser (the agent's job)
+  Launchd.swift              `launchctl print gui/<uid>/<label>`, its parser, and startFailure
+                             (launchd's last spawn failed: the health warning)
   LogEvent.swift             a log line's kind (outage, stage, apps, volume, …) for Events (pure)
 Sources/NimbusUpsBar/        the app
   main.swift                 flags, AppDelegate, single-instance rule, agent toggling
@@ -144,12 +147,13 @@ Sources/NimbusUpsBar/        the app
                              the charge limit, outage bands, hover readout
   AppIcon.swift, DMGBackground.swift, Updates.swift   as in the siblings
 Tests/UpsGuardCoreTests/     97 scenarios against FakeEnvironment, each rehearsal scenario among them
-Tests/NimbusUpsBarKitTests/  89 checks: the HID decode against both CP1500 fixtures and
+Tests/NimbusUpsBarKitTests/  99 checks: the HID decode against both CP1500 fixtures and
                              hand-made maps, every health rule (and that each menu row fits), the
                              DA dictionary filter, the holder resolver against a fake desk (and
                              no AppleScript in it), the merge, the Inspector's sections, JSON,
-                             diff and search, the launchctl parser, the log-line kinds, the
-                             stuck-read recovery on real threads, the relaunch carryover store
+                             diff and search, the launchctl parser and the 2026-10-11 failed
+                             login, the log-line kinds, the stuck-read recovery on real threads,
+                             the relaunch carryover store, the dev bundle's settings copy
 docs/                        icon.png (build.sh icon); phase-2-email-notifications.md (design)
 build.sh                     build / test / run / stop / app / dmg / release / install /
                              uninstall / status / icon / clean
@@ -165,8 +169,8 @@ main.
 ## Build, run, test
 
 ```
-./build.sh run [--fg]         debug build as dist/debug/Nimbus UPS Bar.app (quits any running copy first)
-./build.sh test               swift test: the 97 guard scenarios and the 89 platform checks
+./build.sh run [--fg]         debug build as dist/debug/Nimbus UPS Bar Dev.app (quits any running copy first)
+./build.sh test               swift test: the 97 guard scenarios and the 99 platform checks
 ./build.sh install            release → /Applications, register the agent (owner's call), launch
 .build/debug/NimbusUpsBar --print        the UPS, health, every HID field, volumes, holders, policy
 .build/debug/NimbusUpsBar --print-menu   the menu built against the real UPS, as an indented tree
@@ -192,7 +196,12 @@ terminal does not have as of 2026-10-10.
 **Which copy is running matters.** The bare `.build/debug` binary has no bundle: no agent plist
 (`Run in Background` is disabled, `--agent-status` says so), no notifications, and
 `UserDefaults` land in a `NimbusUpsBar` domain rather than `com.njoubert.nimbusupsbar`. Test
-behaviour through the bundle `build.sh run` makes.
+behaviour through the bundle `build.sh run` makes. That bundle is *Nimbus UPS Bar Dev*,
+`com.njoubert.nimbusupsbar.dev` (`Updates.devBundleID`): its own defaults domain (seeded once
+from the release's by `DevDefaults`, outage state left behind), notification permission, agent
+label and Login Items entry. It still quits the installed copy at launch (one guard at a time),
+which then stays down until the next login or a hand launch. Never run a binary with the
+release's identifier from anywhere but `/Applications` (see Platform facts).
 
 ## How the guard decides (read Guard.swift for the details)
 
@@ -364,13 +373,27 @@ the end, so `safe` is reached the moment the last volume lands rather than two s
   filtered by protocol; EFI and Apple_Boot helper partitions by `DAMediaContent` GUID.
 - **`SMAppService.agent(plistName:)` reports a never-registered agent as `.notFound`**, not
   `.notRegistered`. Whether the plist is in the bundle is a separate file check (`isAvailable`).
-  The plist text lives in `BackgroundAgent.plist(executable:)` and build.sh writes it into
-  `Contents/Library/LaunchAgents/` with `--agent-plist`; `KeepAlive = {SuccessfulExit = false}` so
+  The plist text lives in `BackgroundAgent.plist(executable:label:)` and build.sh writes it into
+  `Contents/Library/LaunchAgents/` with `--agent-plist <bundle id>`; `KeepAlive = {SuccessfulExit = false}` so
   Quit (exit 0) stays quit and a crash restarts.
-- **Only one copy runs.** The newest copy terminates any other with the same bundle id at launch
-  (`AppDelegate`), which is what makes toggling the agent work: enabling makes launchd start a copy
-  that takes over; disabling spawns `open -n` of the bundle first, then unregisters (launchd stops
-  the agent's job). `--dump-bar` skips the rule so it can grab the bar beside the live copy.
+- **Login Items follows the bundle id; launchd checks the binary** (found 2026-10-11, the
+  installed v0.1.0 never started at login). `backgroundtaskmanagementd` keeps one record per bundle
+  identifier and moves it to whichever copy last asked about its agent (`SMAppService.status`;
+  the log says `_bundleURLForAuditToken: updating item … URL to …`). The job also carries a launch
+  constraint on the registered binary's cdhash. A dev copy under the release's identifier opened
+  its menu, the record moved to `dist/debug`, and at the next login launchd ran the dev binary:
+  `OS_REASON_CODESIGNING | Launch Constraint Violation`, then `invalidateLaunchItem`, then
+  `Could not find and/or execute program … 3: No such process` every 10 s (`last exit code = 78:
+  EX_CONFIG`). Rebuilt while pointing at the dev copy, the record then rejected the release binary
+  too. Nothing ran; the menu, opened by hand, looked healthy. Hence the dev bundle id, and the
+  health warning (`LaunchdJob.startFailure`, checked every minute). Repair: Run in Background off
+  and on from the `/Applications` copy. Read it with `/usr/bin/log show` (zsh's `log` is a builtin):
+  process `launchd`, `xpcproxy`, `backgroundtaskmanagementd`, message containing `nimbusupsbar`.
+- **Only one copy runs.** The newest copy terminates any other of either bundle id at launch
+  (`AppDelegate`, `Updates.bundleIDs`), which is what makes toggling the agent work: enabling
+  makes launchd start a copy that takes over; disabling spawns `open -n` of the bundle first,
+  then unregisters (launchd stops the agent's job). `--dump-bar` skips the rule so it can grab
+  the bar beside the live copy.
 - **`UNUserNotificationCenter` needs a bundle**; the bare binary logs instead (`Notifications.available`).
 - **The Settings window is an `NSTabViewController` with `tabStyle = .toolbar`** in an
   `NSWindow(contentViewController:)`. Traps found 2026-10-10: the window's title follows the
@@ -420,7 +443,8 @@ what each settles:
   now reachable through `--after-safe`, which refuses without a TTY and a typed word. Whether the
   hardened-runtime bundle gets a TCC Automation prompt for loginwindow on first use is the open
   question: unattended, that prompt would be a silent no-op shutdown.
-- Agent registration from `/Applications`, the enable/disable hand-over, the clean-quit path in
+- A start at login since the 2026-10-11 repair (registration from `/Applications` works; the
+  first login failed, see Platform facts), the enable/disable hand-over, the clean-quit path in
   `build.sh` (`pgrep -x NimbusUpsBar` after each step), and a `kill -9` restart.
 - A launch mid-outage: the resumed clock (`outageStartedAt`) and the carried-over volumes and
   asks (`guardCarryover`), tested only against the fake.
