@@ -50,7 +50,7 @@ jobs:
   # Developer ID build). It can ask the other half: does what this source declares still match
   # what is actually published? A pull request that changes the bundle identifier or the team
   # would strand every installed copy on the release they have — silently, forever.
-  # `continue-on-error` until the first release exists; drop it once v1.0.0 is published.
+  # `continue-on-error` until the first release exists; drop it once v0.1.0 is published.
   update-health:
     runs-on: macos-15
     continue-on-error: true
