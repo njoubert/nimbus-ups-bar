@@ -381,7 +381,10 @@ the end, so `safe` is reached the moment the last volume lands rather than two s
   .byWordWrapping` collapses to a few words wide in a grid cell. Key equivalents (⌘, ⌘W ⌘C ⌘V)
   come from `NSApp.mainMenu`, which an LSUIElement app has to build itself (`MainMenu.install()`).
   Form fields hold a `DurationFormatter`; a string `Duration.parse` rejects keeps the focus and
-  shows the reason under the form.
+  shows the reason under the form. AppKit shows tooltips only while the app is active, which a
+  menu bar app usually is not while its window sits on screen: both windows set
+  `allowsToolTipsWhenApplicationIsInactive` (2026-10-11: the owner saw no tooltip on the Force
+  unmount warning sign).
 - **`leaks` reports ~400 leaked objects** (~20 KB) in three `NSXPCConnection` retain cycles
   (`LNDaemonApplicationInterface`, notifications / LaunchServices) right after launch. Framework
   internals, not ours; check that the count stays flat before chasing it.
